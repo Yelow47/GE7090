@@ -112,53 +112,141 @@ def _utm_to_geo(easting, northing, zone, hemi):
     return np.degrees(lon), np.degrees(lat)
 
 
-def _point_in_polygon(px, py, polygon):
-    n=len(polygon); ins=False; j=n-1
-    for i in range(n):
-        xi,yi=polygon[i]; xj,yj=polygon[j]
-        if ((yi>py)!=(yj>py)) and (px<(xj-xi)*(py-yi)/(yj-yi+1e-15)+xi):
-            ins=not ins
-        j=i
-    return ins
+def _poly_to_mask_scanline(rows, cols, lon_col, lat_row, pts_geo, bbox):
+    """Vectorised scanline rasterisation of a single polygon onto the image grid."""
+    bx0,by0,bx1,by1 = bbox
+    # Row range that overlaps this polygon
+    if hasattr(lat_row, "__len__"):
+        r0 = int(np.searchsorted(lat_row[::-1], by1, side="right"))
+        r1 = int(np.searchsorted(lat_row[::-1], by0, side="left"))
+        r0 = max(0, rows - 1 - r1); r1 = min(rows, rows - r0)
+        r_slice = slice(max(0, rows-1-int(np.searchsorted(lat_row[::-1],by0,"left"))),
+                        min(rows, rows-int(np.searchsorted(lat_row[::-1],by1,"right"))+1))
+    else:
+        r_slice = slice(0, rows)
+
+    mask_rows = np.zeros(rows, dtype=bool)
+    xs = np.array([p[0] for p in pts_geo])
+    ys = np.array([p[1] for p in pts_geo])
+    n  = len(xs)
+
+    if hasattr(lat_row, "__len__"):
+        lats = lat_row
+    else:
+        lats = np.full(rows, float(lat_row))
+
+    # Scanline fill: for each row, cast a ray in the x direction
+    for ri in range(rows):
+        lat = float(lats[ri]) if hasattr(lats, "__len__") else float(lats)
+        if lat < by0 or lat > by1:
+            continue
+        # Find x-crossings
+        crossings = []
+        for i in range(n):
+            j = (i - 1) % n
+            yi, yj = ys[i], ys[j]
+            xi, xj = xs[i], xs[j]
+            if (yi > lat) != (yj > lat):
+                x_cross = xi + (lat - yi) * (xj - xi) / (yj - yi + 1e-15)
+                crossings.append(x_cross)
+        crossings.sort()
+        # Fill between pairs of crossings
+        for k in range(0, len(crossings) - 1, 2):
+            x0c, x1c = crossings[k], crossings[k+1]
+            if hasattr(lon_col, "__len__"):
+                c0 = int(np.searchsorted(lon_col, x0c))
+                c1 = int(np.searchsorted(lon_col, x1c)) + 1
+            else:
+                c0, c1 = 0, cols
+            mask_rows[ri] = True
+            break  # mark row as containing land, full col range handled below
+    return mask_rows
 
 
 def build_land_mask(transform, shape, polygons, crs_epsg):
-    from scipy.ndimage import binary_dilation
-    rows,cols=shape; mask=np.zeros((rows,cols),dtype=bool)
-    if not polygons: return mask
-    col_idx=np.arange(cols); row_idx=np.arange(rows)
-    px_x=transform.c+col_idx*transform.a
-    px_y=transform.f+row_idx*transform.e
-    epsg=int(crs_epsg) if crs_epsg else 4326
-    if epsg==4326:
-        lon_col=px_x; lat_row=px_y
-    elif 32601<=epsg<=32660:
-        lon_col,lat_row=_utm_to_geo(px_x,px_y,epsg%100,"N")
-    elif 32701<=epsg<=32760:
-        lon_col,lat_row=_utm_to_geo(px_x,px_y,epsg%100,"S")
+    """
+    Rasterise land polygons onto the SAR image grid.
+    Uses a downsampled grid for speed then upsamples.
+    """
+    from scipy.ndimage import binary_dilation, zoom
+    from PIL import Image as PILImage
+
+    rows, cols = shape
+    if not polygons:
+        return np.zeros((rows, cols), dtype=bool)
+
+    # Build coordinate arrays for every pixel
+    col_idx = np.arange(cols, dtype=np.float64)
+    row_idx = np.arange(rows, dtype=np.float64)
+    px_x = transform.c + col_idx * transform.a
+    px_y = transform.f + row_idx * transform.e
+
+    epsg = int(crs_epsg) if crs_epsg else 4326
+    if epsg == 4326:
+        lon_col = px_x; lat_row = px_y
+    elif 32601 <= epsg <= 32660:
+        lon_col, lat_row = _utm_to_geo(px_x, px_y, epsg % 100, "N")
+    elif 32701 <= epsg <= 32760:
+        lon_col, lat_row = _utm_to_geo(px_x, px_y, epsg % 100, "S")
     else:
-        lon_col=px_x; lat_row=px_y
-    img_lon_min,img_lon_max=lon_col.min(),lon_col.max()
-    img_lat_min,img_lat_max=lat_row.min(),lat_row.max()
-    step=max(1,min(rows,cols)//400)
-    geo_polys=[]
-    for bbox_m,pts_m in polygons:
-        bx0,by0=_merc_to_geo(bbox_m[0],bbox_m[1])
-        bx1,by1=_merc_to_geo(bbox_m[2],bbox_m[3])
-        if bx1<img_lon_min or bx0>img_lon_max: continue
-        if by1<img_lat_min or by0>img_lat_max: continue
-        pts_geo=[_merc_to_geo(x,y) for x,y in pts_m]
-        geo_polys.append(((float(bx0),float(by0),float(bx1),float(by1)),pts_geo))
-    for (bx0,by0,bx1,by1),pts_geo in geo_polys:
-        for ri in range(0,rows,step):
-            lat=float(lat_row[ri] if hasattr(lat_row,"__len__") else lat_row)
-            if lat<by0 or lat>by1: continue
-            for ci in range(0,cols,step):
-                lon=float(lon_col[ci] if hasattr(lon_col,"__len__") else lon_col)
-                if lon<bx0 or lon>bx1: continue
-                if _point_in_polygon(lon,lat,pts_geo):
-                    mask[ri:min(ri+step,rows),ci:min(ci+step,cols)]=True
-    return binary_dilation(mask,iterations=max(1,step))
+        lon_col = px_x; lat_row = px_y
+
+    img_lon_min, img_lon_max = float(lon_col.min()), float(lon_col.max())
+    img_lat_min, img_lat_max = float(lat_row.min()), float(lat_row.max())
+
+    # Work at reduced resolution for speed
+    SCALE = 400
+    small_rows = max(4, rows // SCALE)
+    small_cols = max(4, cols // SCALE)
+    sr = np.linspace(0, rows-1, small_rows).astype(int)
+    sc = np.linspace(0, cols-1, small_cols).astype(int)
+    s_lat = lat_row[sr]
+    s_lon = lon_col[sc]
+    s_lat_min, s_lat_max = float(s_lat.min()), float(s_lat.max())
+    s_lon_min, s_lon_max = float(s_lon.min()), float(s_lon.max())
+
+    small_mask = np.zeros((small_rows, small_cols), dtype=np.uint8)
+
+    # Build lon/lat grids at small resolution
+    LON, LAT = np.meshgrid(s_lon, s_lat)  # (small_rows, small_cols)
+
+    for bbox_m, pts_m in polygons:
+        bx0, by0 = _merc_to_geo(bbox_m[0], bbox_m[1])
+        bx1, by1 = _merc_to_geo(bbox_m[2], bbox_m[3])
+        bx0, bx1 = float(bx0), float(bx1)
+        by0, by1 = float(by0), float(by1)
+        # Skip polygons that don't overlap the image
+        if bx1 < s_lon_min or bx0 > s_lon_max: continue
+        if by1 < s_lat_min or by0 > s_lat_max: continue
+
+        pts_geo = [(_merc_to_geo(x, y)) for x, y in pts_m]
+        xs = np.array([p[0] for p in pts_geo])
+        ys = np.array([p[1] for p in pts_geo])
+        n  = len(xs)
+
+        # Vectorised ray casting over the small grid
+        inside = np.zeros((small_rows, small_cols), dtype=bool)
+        j = n - 1
+        for i in range(n):
+            xi, yi = xs[i], ys[i]
+            xj, yj = xs[j], xs[j]  # x coords only needed for crossing x
+            xj = xs[j]; yj = ys[j]
+            cond = ((ys[i] > LAT) != (ys[j] > LAT))
+            x_cross = xs[i] + (LAT - ys[i]) * (xs[j] - xs[i]) / (ys[j] - ys[i] + 1e-15)
+            inside ^= cond & (LON < x_cross)
+            j = i
+
+        small_mask |= inside.astype(np.uint8)
+
+    # Upsample back to full resolution using nearest-neighbour
+    if small_mask.any():
+        pil_small = PILImage.fromarray(small_mask * 255, mode="L")
+        pil_full  = pil_small.resize((cols, rows), PILImage.NEAREST)
+        full_mask = np.array(pil_full) > 127
+        # Dilate slightly to cover coastline border pixels
+        full_mask = binary_dilation(full_mask, iterations=max(2, SCALE // 100))
+        return full_mask
+    return np.zeros((rows, cols), dtype=bool)
 
 
 # ── MODEL ─────────────────────────────────────────────────────
@@ -258,10 +346,12 @@ def lee(img, valid_mask, size=7):
 # ── CA-CFAR — runs on RAW calibrated image ────────────────────
 
 def _box_mean(img, half):
-    padded=np.pad(img,half,mode="edge")
-    cs=padded.cumsum(axis=0).cumsum(axis=1)
-    size=2*half+1
-    return (cs[size:,size:]-cs[:-size,size:]-cs[size:,:-size]+cs[:-size,:-size])/size**2
+    h, w = img.shape
+    padded = np.pad(img, half, mode="edge")
+    cs     = padded.cumsum(axis=0).cumsum(axis=1)
+    size   = 2 * half + 1
+    out    = (cs[size:,size:] - cs[:-size,size:] - cs[size:,:-size] + cs[:-size,:-size]) / size**2
+    return out[:h, :w]
 
 
 def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
