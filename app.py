@@ -10,7 +10,7 @@ from pathlib import Path
 from io import BytesIO
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "v1.05"
+APP_VERSION = "v1.06"
 
 st.set_page_config(page_title="SARDetect", page_icon="🛰️", layout="wide")
 
@@ -215,8 +215,8 @@ def build_land_mask(transform, shape, polygons, crs_epsg):
     for bbox_m, pts_m in polygons:
         bx0, by0 = _merc_to_geo(bbox_m[0], bbox_m[1])
         bx1, by1 = _merc_to_geo(bbox_m[2], bbox_m[3])
-        bx0, bx1 = float(bx0), float(bx1)
-        by0, by1 = float(by0), float(by1)
+        bx0, bx1 = float(min(bx0,bx1)), float(max(bx0,bx1))
+        by0, by1 = float(min(by0,by1)), float(max(by0,by1))
         # Skip polygons that don't overlap the image
         if bx1 < s_lon_min or bx0 > s_lon_max: continue
         if by1 < s_lat_min or by0 > s_lat_max: continue
@@ -273,10 +273,20 @@ def download_weights():
 # ── SAR I/O & CALIBRATION ─────────────────────────────────────
 
 def _dn_to_db(dn):
-    valid=dn>0
-    sigma=np.where(valid,dn.astype(np.float64)**2*1e-4,1e-10)
-    db=(10.0*np.log10(np.clip(sigma,1e-10,None))).astype(np.float32)
-    return db,valid
+    """Convert raw Sentinel-1 DN to gamma-naught dB.
+    If input is already in dB range (values between -60 and +60),
+    skip calibration — the GeoTIFF was already processed by ArcGIS/SNAP.
+    Raw Sentinel-1 DN values are always positive integers up to ~65535.
+    """
+    valid = dn > 0
+    flat  = dn[valid] if valid.any() else dn.ravel()
+    # Already in dB if values are in the physical SAR backscatter range
+    if flat.min() >= -60.0 and flat.max() <= 60.0:
+        return dn.astype(np.float32), valid
+    # Raw DN: apply Sentinel-1 default constant factor
+    sigma = np.where(valid, dn.astype(np.float64)**2 * 1e-4, 1e-10)
+    db    = (10.0 * np.log10(np.clip(sigma, 1e-10, None))).astype(np.float32)
+    return db, valid
 
 
 def calibrate(dn, safe_dir):
@@ -358,9 +368,13 @@ def _box_mean(img, half):
 
 def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
     from scipy.ndimage import label as scipy_label, binary_erosion
-    edge_margin=max(12,bg*2+guard)
-    proc_mask=binary_erosion(valid_mask,iterations=edge_margin,border_value=0)
-    proc_mask&=~land_mask
+    h, w = img.shape
+    edge_margin = max(12, bg*2+guard)
+    proc_mask   = binary_erosion(valid_mask, iterations=edge_margin, border_value=0)
+    # Guarantee shapes match — binary_erosion can return slightly different size
+    proc_mask   = proc_mask[:h, :w]
+    land_mask   = land_mask[:h, :w]
+    proc_mask  &= ~land_mask
     work=img.copy()
     bg_fill=np.median(img[valid_mask]) if valid_mask.any() else 0.0
     work[~valid_mask]=bg_fill
@@ -593,17 +607,20 @@ def faq_section():
                 '</p>',unsafe_allow_html=True)
 
 
+# ── MAIN ──────────────────────────────────────────────────────
+
 def main():
     guard,bg,thresh,mn,mx,conf,overlap,land_on=sidebar()
 
-    st.markdown(
-        f'<div style="position:fixed;top:60px;right:18px;z-index:9999;">'
-        f'<span style="font-family:Share Tech Mono,monospace;font-size:.7rem;'
-        f'color:#3d4f6a;background:#0c1428;border:1px solid #111e35;'
-        f'border-radius:3px;padding:3px 8px;letter-spacing:.1em">{APP_VERSION}</span>'
-        f'</div>',
-        unsafe_allow_html=True)
-    st.markdown('<p class="main-title">SARDETECT</p>',unsafe_allow_html=True)
+    # Version badge top right
+st.markdown(
+    f'<div style="position:fixed;top:60px;right:18px;z-index:9999;">'
+    f'<span style="font-family:Share Tech Mono,monospace;font-size:.7rem;'
+    f'color:#3d4f6a;background:#0c1428;border:1px solid #111e35;'
+    f'border-radius:3px;padding:3px 8px;letter-spacing:.1em">{APP_VERSION}</span>'
+    f'</div>',
+    unsafe_allow_html=True)
+st.markdown('<p class="main-title">SARDETECT</p>',unsafe_allow_html=True)
     st.markdown('<p class="sub-title">SYNTHETIC APERTURE RADAR  ·  DUAL METHOD VESSEL DETECTION</p>',unsafe_allow_html=True)
 
     c1,c2,c3=st.columns(3)
@@ -638,6 +655,9 @@ def main():
 
             def log(msg):
                 logs.append(msg)
+                css = ("log-error" if msg.startswith("ERROR") else
+                       "log-warn"  if msg.startswith("WARN")  else
+                       "log-ok"    if msg.startswith("✓")     else "")
                 lines="".join(
                     f'<span class="{"log-error" if l.startswith("ERROR") else "log-warn" if l.startswith("WARN") else "log-ok" if l.startswith("✓") else ""}">{l}</span><br>'
                     for l in logs)
@@ -720,5 +740,4 @@ def main():
 
 if __name__=="__main__":
     main()
-
 
