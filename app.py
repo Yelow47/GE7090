@@ -385,7 +385,11 @@ def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
     var_grd=np.clip(_box_mean(work**2,guard)-mean_grd**2,0,None)
     var_ring=np.clip((var_out*n_out-var_grd*n_grd)/(n_ring+1e-10),0,None)
     std_ring=np.sqrt(var_ring)
-    detected=(work>mean_ring+thresh*std_ring)&proc_mask
+    h, w = img.shape
+    mean_ring = mean_ring[:h, :w]
+    std_ring  = std_ring[:h, :w]
+    proc_mask = proc_mask[:h, :w]
+    detected  = (work > mean_ring + thresh * std_ring) & proc_mask
     labeled,n=scipy_label(detected)
     boxes=[]
     for i in range(1,n+1):
