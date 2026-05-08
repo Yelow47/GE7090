@@ -13,29 +13,177 @@ st.set_page_config(page_title="SARDetect", page_icon="🛰️", layout="wide")
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow:wght@300;400;600&display=swap');
-html,body,[class*="css"]{font-family:'Barlow',sans-serif;background:#070d1a;color:#b8c4d8}
-.stApp{background:radial-gradient(ellipse at 15% 10%,#0a1a35 0%,#070d1a 55%)}
-h1,h2,h3{font-family:'Share Tech Mono',monospace!important}
-.main-title{font-family:'Share Tech Mono',monospace;font-size:2.6rem;color:#00d4ff;letter-spacing:.1em;text-shadow:0 0 40px rgba(0,212,255,.35);margin:0}
-.sub-title{font-family:'Share Tech Mono',monospace;font-size:.78rem;color:#2a4060;letter-spacing:.22em;margin:0 0 1.5rem}
-.card{background:#0a1220;border:1px solid #0d1e35;border-top:2px solid;border-radius:3px;padding:14px 18px}
-.card h4{font-family:'Share Tech Mono',monospace;font-size:.82rem;letter-spacing:.15em;margin:0 0 6px}
-.card p{font-size:.83rem;color:#5a7090;margin:0;line-height:1.55}
-.cfar-top{border-top-color:#00d4ff}.cfar-top h4{color:#00d4ff}
-.yolo-top{border-top-color:#ff3d5a}.yolo-top h4{color:#ff3d5a}
-.comb-top{border-top-color:#7fff6a}.comb-top h4{color:#7fff6a}
-.mbox{background:#080f1e;border:1px solid #0d1e35;border-radius:3px;padding:18px;text-align:center}
-.mval{font-family:'Share Tech Mono',monospace;font-size:2.4rem;margin:0;line-height:1}
-.mlbl{font-size:.7rem;color:#3a5070;letter-spacing:.18em;margin:4px 0 0;text-transform:uppercase}
-.cc{color:#00d4ff}.yc{color:#ff3d5a}.dc{color:#4a6080}
-.faq-q{font-family:'Share Tech Mono',monospace;color:#00d4ff;font-size:.88rem;margin:18px 0 4px}
-.faq-a{color:#6a8098;font-size:.86rem;line-height:1.65;margin:0}
-.stButton>button{font-family:'Share Tech Mono',monospace!important;background:#00d4ff!important;color:#070d1a!important;border:none!important;border-radius:2px!important;font-weight:700!important;letter-spacing:.12em!important}
-.stButton>button:hover{background:#00aacc!important;box-shadow:0 0 24px rgba(0,212,255,.28)!important}
-section[data-testid="stSidebar"]{background:#080f1e;border-right:1px solid #0d1a2e}
-.stProgress>div>div{background:#00d4ff!important}
-hr{border-color:#0d1a2e!important}
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Inter:wght@300;400;500;600&display=swap');
+
+/* ── Base ── */
+html,body,[class*="css"]{
+    font-family:'Inter',sans-serif;
+    background:#080e1f;
+    color:#e8edf5;
+    font-size:15px;
+    line-height:1.6;
+}
+.stApp{
+    background:
+        radial-gradient(ellipse at 0% 0%,rgba(240,165,0,0.04) 0%,transparent 50%),
+        radial-gradient(ellipse at 100% 100%,rgba(0,200,240,0.04) 0%,transparent 50%),
+        #080e1f;
+}
+
+/* ── Typography ── */
+h1,h2,h3{font-family:'Share Tech Mono',monospace!important;color:#e8edf5!important}
+p,li,span{color:#e8edf5}
+
+.main-title{
+    font-family:'Share Tech Mono',monospace;
+    font-size:2.6rem;
+    color:#f0a500!important;
+    letter-spacing:.1em;
+    text-shadow:0 0 40px rgba(240,165,0,0.3);
+    margin:0;
+}
+.sub-title{
+    font-family:'Share Tech Mono',monospace;
+    font-size:.75rem;
+    color:#3d4f6a;
+    letter-spacing:.25em;
+    margin:0 0 1.5rem;
+}
+
+/* ── Method cards ── */
+.card{
+    background:#0c1428;
+    border:1px solid #111e35;
+    border-top:2px solid;
+    border-radius:4px;
+    padding:16px 20px;
+    height:100%;
+}
+.card h4{
+    font-family:'Share Tech Mono',monospace;
+    font-size:.8rem;
+    letter-spacing:.15em;
+    margin:0 0 8px;
+}
+.card p{
+    font-size:.86rem;
+    color:#8a9ab8;
+    margin:0;
+    line-height:1.6;
+}
+.cfar-top{border-top-color:#00c8f0}.cfar-top h4{color:#00c8f0}
+.yolo-top{border-top-color:#ff4a5a}.yolo-top h4{color:#ff4a5a}
+.comb-top{border-top-color:#4dff91}.comb-top h4{color:#4dff91}
+
+/* ── Metric boxes ── */
+.mbox{
+    background:#0c1428;
+    border:1px solid #111e35;
+    border-radius:4px;
+    padding:20px;
+    text-align:center;
+}
+.mval{
+    font-family:'Share Tech Mono',monospace;
+    font-size:2.6rem;
+    margin:0;
+    line-height:1;
+}
+.mlbl{
+    font-size:.7rem;
+    color:#8a9ab8;
+    letter-spacing:.18em;
+    margin:6px 0 0;
+    text-transform:uppercase;
+}
+.cc{color:#00c8f0}
+.yc{color:#ff4a5a}
+.dc{color:#8a9ab8}
+
+/* ── FAQ ── */
+.faq-q{
+    font-family:'Share Tech Mono',monospace;
+    color:#f0a500;
+    font-size:.88rem;
+    margin:20px 0 6px;
+}
+.faq-a{
+    color:#8a9ab8;
+    font-size:.88rem;
+    line-height:1.7;
+    margin:0;
+}
+
+/* ── Buttons ── */
+.stButton>button{
+    font-family:'Share Tech Mono',monospace!important;
+    background:#f0a500!important;
+    color:#080e1f!important;
+    border:none!important;
+    border-radius:3px!important;
+    font-weight:700!important;
+    letter-spacing:.1em!important;
+    padding:.55rem 2rem!important;
+    transition:all .2s!important;
+}
+.stButton>button:hover{
+    background:#d49000!important;
+    box-shadow:0 0 24px rgba(240,165,0,0.3)!important;
+}
+
+/* ── File uploader ── */
+div[data-testid="stFileUploader"]{
+    background:#0a1122!important;
+    border:1px dashed #1a2e50!important;
+    border-radius:4px!important;
+}
+
+/* ── Sidebar ── */
+section[data-testid="stSidebar"]{
+    background:#0c1428;
+    border-right:1px solid #111e35;
+}
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] .stMarkdown{
+    color:#e8edf5!important;
+}
+
+/* ── Sliders and inputs ── */
+.stSlider>div>div>div{background:#f0a500!important}
+.stProgress>div>div{background:#f0a500!important}
+
+/* ── Info boxes ── */
+.stAlert{background:#0c1428!important;border-color:#1a2e50!important;color:#e8edf5!important}
+
+/* ── Code blocks ── */
+.stCode{background:#0a1122!important}
+
+/* ── Divider ── */
+hr{border-color:#111e35!important;margin:1.5rem 0!important}
+
+/* ── Select boxes and number inputs ── */
+.stSelectbox>div>div{background:#0a1122!important;color:#e8edf5!important;border-color:#1a2e50!important}
+
+/* ── Upload label ── */
+.upload-hint{
+    font-family:'Share Tech Mono',monospace;
+    font-size:.75rem;
+    color:#3d4f6a;
+    letter-spacing:.1em;
+    margin:4px 0 12px;
+}
+
+/* ── Section headers ── */
+.section-header{
+    font-family:'Share Tech Mono',monospace;
+    font-size:.9rem;
+    color:#f0a500;
+    letter-spacing:.15em;
+    margin:1.5rem 0 .75rem;
+    padding-bottom:6px;
+    border-bottom:1px solid #111e35;
+}
 </style>""", unsafe_allow_html=True)
 
 WEIGHTS_URL  = "https://github.com/Yelow47/GE7090/releases/download/SAR/best.pt"
@@ -222,8 +370,8 @@ def figure(img, cb, yb):
 
 def sidebar():
     with st.sidebar:
-        st.markdown('<p style="font-family:monospace;color:#00d4ff;font-size:1.1rem;letter-spacing:.1em">SARDETECT</p>', unsafe_allow_html=True)
-        st.markdown('<p style="font-family:monospace;color:#1a3050;font-size:.7rem;letter-spacing:.2em">DUAL METHOD DETECTION</p>', unsafe_allow_html=True)
+        st.markdown('<p style="font-family:monospace;color:#f0a500;font-size:1.1rem;letter-spacing:.1em">SARDETECT</p>', unsafe_allow_html=True)
+        st.markdown('<p style="font-family:monospace;color:#3d4f6a;font-size:.7rem;letter-spacing:.2em">DUAL METHOD DETECTION</p>', unsafe_allow_html=True)
         st.markdown("---")
         st.markdown("**CFAR PARAMETERS**")
         guard  = st.slider("Guard window",       1,  8,   3)
@@ -250,7 +398,7 @@ def sidebar():
         else:
             st.success("✓ Model weights loaded")
         st.markdown("---")
-        st.markdown('<p style="font-family:monospace;font-size:.7rem;color:#1a3050">Model: YOLOv8m-OBB<br>Dataset: OpenSARWake<br>Xu & Wang, IEEE GRSL 2024<br>github.com/Yelow47/GE7090</p>', unsafe_allow_html=True)
+        st.markdown('<p style="font-family:monospace;font-size:.7rem;color:#3d4f6a">Model: YOLOv8m-OBB<br>Dataset: OpenSARWake<br>Xu & Wang, IEEE GRSL 2024<br>github.com/Yelow47/GE7090</p>', unsafe_allow_html=True)
     return guard, bg, thresh, mn, mx, conf, tile, overlap
 
 
@@ -278,7 +426,7 @@ def faq_section():
         st.markdown(f'<p class="faq-q">▸ {q}</p>', unsafe_allow_html=True)
         st.markdown(f'<p class="faq-a">{a}</p>', unsafe_allow_html=True)
     st.markdown("---")
-    st.markdown('<p style="font-family:monospace;font-size:.75rem;color:#1a3050;text-align:center">OpenSARWake — Xu & Wang (2024) · IEEE GRSL · DOI: 10.1109/LGRS.2024.3392681<br>Built with Streamlit · Ultralytics YOLOv8 · SAHI · Rasterio · SciPy</p>', unsafe_allow_html=True)
+    st.markdown('<p style="font-family:monospace;font-size:.75rem;color:#3d4f6a;text-align:center">OpenSARWake — Xu & Wang (2024) · IEEE GRSL · DOI: 10.1109/LGRS.2024.3392681<br>Built with Streamlit · Ultralytics YOLOv8 · SAHI · Rasterio · SciPy</p>', unsafe_allow_html=True)
 
 
 def main():
@@ -297,12 +445,12 @@ def main():
 
     st.markdown("---")
     st.markdown("### UPLOAD SAR IMAGE")
-    st.markdown('<p style="font-family:monospace;font-size:.78rem;color:#1a3050">Supported: GeoTIFF (.tif/.tiff) · PNG · Zipped Sentinel-1 SAFE folder (.zip)</p>', unsafe_allow_html=True)
+    st.markdown('<p class="upload-hint">Supported: GeoTIFF (.tif/.tiff) · PNG · Zipped Sentinel-1 SAFE folder (.zip)</p>', unsafe_allow_html=True)
 
     uploaded = st.file_uploader("", type=["tif","tiff","png","zip"], label_visibility="collapsed")
 
     if uploaded:
-        st.markdown(f'<p style="font-family:monospace;font-size:.78rem;color:#2a5070">✓ {uploaded.name} — {uploaded.size/1e6:.1f} MB</p>', unsafe_allow_html=True)
+        st.markdown(f'<p style="font-family:monospace;font-size:.78rem;color:#8a9ab8">✓ {uploaded.name} — {uploaded.size/1e6:.1f} MB</p>', unsafe_allow_html=True)
 
         if st.button("▶  RUN DETECTION"):
             prog   = st.progress(0)
