@@ -9,7 +9,7 @@ from pathlib import Path
 from io import BytesIO
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "v1.07"
+APP_VERSION = "v1.08"
 
 st.set_page_config(page_title="SARDetect", page_icon="🛰️", layout="wide")
 
@@ -60,16 +60,13 @@ TEMP_DIR.mkdir(exist_ok=True)
 # ── LAND MASK ─────────────────────────────────────────────────
 
 def build_land_mask(transform, shape, crs_epsg):
-    """
-    Rasterise global land polygon shapefile onto the SAR image grid.
-    Uses geopandas + rasterio.features for correct georeferenced rasterisation.
-    """
     import geopandas as gpd
     from rasterio.features import rasterize
     from rasterio.crs import CRS
+    from rasterio.transform import array_bounds
+    from shapely.geometry import box as shapely_box
 
     rows, cols = shape
-
     if not LAND_ZIP.exists():
         return np.zeros((rows, cols), dtype=bool)
 
@@ -80,10 +77,7 @@ def build_land_mask(transform, shape, crs_epsg):
         with zipfile.ZipFile(LAND_ZIP) as z:
             z.extractall(land_dir)
 
-    # Read shapefile
     gdf = gpd.read_file(str(shp_path))
-
-    # Reproject to match the SAR image CRS
     epsg = int(crs_epsg) if crs_epsg else 4326
     image_crs = CRS.from_epsg(epsg)
     if gdf.crs is None:
@@ -91,25 +85,16 @@ def build_land_mask(transform, shape, crs_epsg):
     if gdf.crs != image_crs:
         gdf = gdf.to_crs(image_crs)
 
-    # Filter to only polygons that overlap the image extent
-    from rasterio.transform import array_bounds
-    bounds = array_bounds(rows, cols, transform)  # (left, bottom, right, top)
-    from shapely.geometry import box as shapely_box
+    bounds  = array_bounds(rows, cols, transform)
     img_box = shapely_box(*bounds)
-    gdf = gdf[gdf.intersects(img_box)]
+    gdf     = gdf[gdf.intersects(img_box)]
 
     if gdf.empty:
         return np.zeros((rows, cols), dtype=bool)
 
-    # Rasterise
     shapes = [(geom, 1) for geom in gdf.geometry if geom is not None]
-    mask = rasterize(
-        shapes,
-        out_shape=(rows, cols),
-        transform=transform,
-        fill=0,
-        dtype=np.uint8,
-    )
+    mask   = rasterize(shapes, out_shape=(rows, cols),
+                       transform=transform, fill=0, dtype=np.uint8)
     return mask.astype(bool)
 
 
@@ -125,7 +110,7 @@ def load_model():
 
 def download_weights():
     WEIGHTS_PATH.parent.mkdir(exist_ok=True)
-    r = requests.get(WEIGHTS_URL, stream=True, timeout=120)
+    r     = requests.get(WEIGHTS_URL, stream=True, timeout=120)
     r.raise_for_status()
     total = int(r.headers.get("content-length", 0))
     bar   = st.progress(0)
@@ -141,24 +126,23 @@ def download_weights():
 # ── SAR I/O & CALIBRATION ─────────────────────────────────────
 
 def _dn_to_db(dn):
-    """
-    Convert raw Sentinel-1 DN to gamma-naught dB.
-    If values are already in the physical dB range (-60 to +60),
-    the input is treated as already calibrated and passed through unchanged.
-    Raw Sentinel-1 DN values are always large positive integers (up to ~65535).
-    """
     valid = dn > 0
     flat  = dn[valid] if valid.any() else dn.ravel()
     if flat.min() >= -60.0 and flat.max() <= 60.0:
-        # Already calibrated dB — pass through
         return dn.astype(np.float32), valid
     sigma = np.where(valid, dn.astype(np.float64)**2 * 1e-4, 1e-10)
     db    = (10.0 * np.log10(np.clip(sigma, 1e-10, None))).astype(np.float32)
     return db, valid
 
 
+def _match_shapes(db, valid):
+    """Guarantee db and valid are exactly the same shape."""
+    h = min(db.shape[0], valid.shape[0])
+    w = min(db.shape[1], valid.shape[1])
+    return db[:h, :w], valid[:h, :w]
+
+
 def calibrate(dn, safe_dir):
-    """Full gamma-naught calibration from SAFE XML LUT."""
     cal   = list(Path(safe_dir).rglob("calibration-s1*-vv-*.xml"))
     valid = dn > 0
     if not cal:
@@ -169,8 +153,8 @@ def calibrate(dn, safe_dir):
         if pe is not None and ge is not None:
             lut.append(([int(x) for x in pe.text.split()],
                         [float(x) for x in ge.text.split()]))
-    h, w  = dn.shape
-    la    = np.ones((h, w), dtype=np.float64)
+    h, w = dn.shape
+    la   = np.ones((h, w), dtype=np.float64)
     for i, (px, v) in enumerate(lut):
         if i >= h:
             break
@@ -182,7 +166,9 @@ def calibrate(dn, safe_dir):
 
 
 def read_sar(uploaded):
-    """Returns (image_db, valid_mask, transform, crs_epsg)."""
+    """Returns (image_db, valid_mask, transform, crs_epsg).
+    image_db and valid_mask are guaranteed the same shape.
+    """
     import rasterio
     suffix = Path(uploaded.name).suffix.lower()
     tmp    = TEMP_DIR / uploaded.name
@@ -194,6 +180,7 @@ def read_sar(uploaded):
             transform = src.transform
             crs_epsg  = src.crs.to_epsg() if src.crs else 4326
         db, valid = _dn_to_db(dn)
+        db, valid = _match_shapes(db, valid)
         return db, valid, transform, crs_epsg
 
     if suffix == ".zip":
@@ -212,6 +199,7 @@ def read_sar(uploaded):
             transform = src.transform
             crs_epsg  = src.crs.to_epsg() if src.crs else 4326
         db, valid = calibrate(dn, vv[0].parent.parent)
+        db, valid = _match_shapes(db, valid)
         return db, valid, transform, crs_epsg
 
     raise ValueError(
@@ -219,7 +207,7 @@ def read_sar(uploaded):
         "Upload a GeoTIFF (.tif/.tiff) or zipped Sentinel-1 SAFE folder (.zip).")
 
 
-# ── SPECKLE FILTER — for YOLO only, never before CFAR ─────────
+# ── SPECKLE FILTER — for YOLO only ────────────────────────────
 
 def lee(img, valid_mask, size=7):
     from scipy.ndimage import uniform_filter
@@ -234,37 +222,37 @@ def lee(img, valid_mask, size=7):
     return out
 
 
-# ── CA-CFAR — runs on RAW calibrated image ────────────────────
+# ── CA-CFAR ────────────────────────────────────────────────────
 
 def _box_mean(img, half):
-    """O(1) box filter using cumulative sum. Output guaranteed same shape as input."""
-    h, w    = img.shape
-    padded  = np.pad(img, half, mode="edge")
-    cs      = padded.cumsum(axis=0).cumsum(axis=1)
-    size    = 2 * half + 1
-    out     = (cs[size:, size:] - cs[:-size, size:] - cs[size:, :-size] + cs[:-size, :-size]) / size**2
+    h, w   = img.shape
+    padded = np.pad(img, half, mode="edge")
+    cs     = padded.cumsum(axis=0).cumsum(axis=1)
+    size   = 2 * half + 1
+    out    = (cs[size:, size:] - cs[:-size, size:] -
+              cs[size:, :-size] + cs[:-size, :-size]) / size**2
     return out[:h, :w]
 
 
 def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
     from scipy.ndimage import label as scipy_label
 
-    h, w = img.shape
-
-    # Force all inputs to exactly match img shape
+    # All arrays clipped to the same shape at the source in read_sar.
+    # Extra safety: clip everything to img shape here too.
+    h, w       = img.shape
     valid_mask = valid_mask[:h, :w]
     land_mask  = land_mask[:h, :w]
-    # Remove edge artefacts by simply zeroing a border strip
-    # This replaces binary_erosion which has shape bugs on very large arrays
-    edge   = max(12, bg * 2 + guard)
-    proc_mask = valid_mask.copy().astype(bool)[:h, :w]
+
+    # Edge strip removal via slicing — avoids scipy binary_erosion shape bugs
+    edge      = max(12, bg * 2 + guard)
+    proc_mask = valid_mask.copy()
     proc_mask[:edge, :]  = False
     proc_mask[-edge:, :] = False
     proc_mask[:, :edge]  = False
     proc_mask[:, -edge:] = False
-    proc_mask &= ~land_mask[:h, :w]
+    proc_mask &= ~land_mask
 
-    work    = img.copy()
+    work    = img[:h, :w].copy()
     bg_fill = float(np.median(img[valid_mask])) if valid_mask.any() else 0.0
     work[~valid_mask] = bg_fill
 
@@ -279,9 +267,6 @@ def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
     var_grd  = np.clip(_box_mean(work**2, guard) - mean_grd**2, 0, None)
     var_ring = np.clip((var_out * n_out - var_grd * n_grd) / (n_ring + 1e-10), 0, None)
     std_ring = np.sqrt(var_ring)
-
-    mean_ring = mean_ring[:h, :w]
-    std_ring  = std_ring[:h, :w]
 
     detected        = (work > mean_ring + thresh * std_ring) & proc_mask
     labeled, n_feat = scipy_label(detected)
@@ -301,13 +286,9 @@ def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
     return boxes
 
 
-# ── YOLO — runs on Lee-filtered image ─────────────────────────
+# ── YOLO ───────────────────────────────────────────────────────
 
 def _prepare_yolo_image(img, valid_mask):
-    """
-    Prepare image for YOLOv8 inference matching OpenSARWake paper contrast:
-    saturate bottom/top 1% of pixel values, convert to 3-channel uint8 PNG.
-    """
     from PIL import Image as PILImage
     src       = img[valid_mask] if valid_mask.any() else img.ravel()
     p1, p99   = np.percentile(src, [1, 99])
@@ -375,7 +356,7 @@ def yolo_detect(img, valid_mask, conf, overlap, land_mask, log):
 # ── DISPLAY & FIGURE ──────────────────────────────────────────
 
 def disp(img, valid_mask=None):
-    src    = img[valid_mask] if (valid_mask is not None and valid_mask.any()) else img
+    src     = img[valid_mask] if (valid_mask is not None and valid_mask.any()) else img
     p2, p98 = np.percentile(src, [2, 98])
     return ((np.clip(img, p2, p98) - p2) / (p98 - p2 + 1e-10) * 255).astype(np.uint8)
 
@@ -398,7 +379,6 @@ def figure(img, valid_mask, land_mask, cb, yb):
     if land_mask.any():
         land_rgba[land_mask, 0] = 0.94
         land_rgba[land_mask, 1] = 0.65
-        land_rgba[land_mask, 2] = 0.0
         land_rgba[land_mask, 3] = 0.30
 
     for col, (title, c, y) in enumerate([
@@ -500,8 +480,7 @@ def faq_section():
          "radiometrically calibrated to gamma-naught (γ0) using the XML LUT from the SAFE metadata."),
         ("What is CFAR detection?",
          "Constant False Alarm Rate (CFAR) detects vessels by finding pixels significantly brighter "
-         "than their local surroundings. This uses CA-CFAR with an annular guard ring — background mean "
-         "and standard deviation are computed from the ring between guard and background windows. "
+         "than their local surroundings. This uses CA-CFAR with an annular guard ring. "
          "CFAR runs directly on the raw calibrated γ0 dB image with no speckle filtering, consistent with "
          "the ArcGIS Detect Bright Ocean Objects workflow."),
         ("What is YOLOv8 wake detection?",
@@ -512,7 +491,7 @@ def faq_section():
         ("Why does CFAR run on unfiltered data but YOLO on filtered data?",
          "CFAR detects sharp bright peaks relative to local background — speckle filtering smooths these "
          "peaks and degrades detection. YOLOv8 benefits from filtering because wake textures are clearer "
-         "in speckle-reduced imagery. The two methods require different input preprocessing."),
+         "in speckle-reduced imagery."),
         ("Why do the two methods find different vessels?",
          "CFAR detects the ship directly via radar cross-section. YOLOv8 detects it indirectly via wake. "
          "A stationary vessel may have no wake. A fast-moving vessel may be defocused but have a clear wake. "
@@ -524,14 +503,12 @@ def faq_section():
         ("What is radiometric calibration?",
          "Raw Sentinel-1 GRD DN values are converted to gamma-naught γ0 = DN² / LUT², using the "
          "calibration XML in the SAFE package, then to dB scale: γ0_dB = 10 × log₁₀(γ0). "
-         "For plain GeoTIFF without XML, the Sentinel-1 default factor (10⁻⁴) is applied. "
-         "Pre-calibrated GeoTIFFs (values already in dB range) are detected automatically and passed through unchanged."),
+         "Pre-calibrated GeoTIFFs are detected automatically and passed through unchanged."),
         ("What satellite data works best?",
          "Sentinel-1 IW mode GRD in VV polarization. Free from Copernicus Data Space "
          "(dataspace.copernicus.eu). Recommended: Strait of Gibraltar, English Channel, North Sea."),
         ("What does mAP50 mean?",
-         "Mean Average Precision at IoU 0.50 — a detection counts as correct if the predicted box overlaps "
-         "ground truth by ≥50%. The model achieves competitive mAP50 versus the paper's SWNet (49.0%)."),
+         "Mean Average Precision at IoU 0.50. The model achieves competitive mAP50 versus the paper's SWNet (49.0%)."),
     ]:
         st.markdown(f'<p class="faq-q">▸ {q}</p>', unsafe_allow_html=True)
         st.markdown(f'<p class="faq-a">{a}</p>', unsafe_allow_html=True)
@@ -612,7 +589,7 @@ def main():
                 log("Reading SAR image...")
                 image, valid_mask, transform, crs_epsg = read_sar(uploaded)
                 vmin, vmax = image[valid_mask].min(), image[valid_mask].max()
-                log(f"✓ Loaded: {image.shape[1]}×{image.shape[0]} px  |  γ0 range [{vmin:.1f}, {vmax:.1f}] dB")
+                log(f"✓ Loaded: {image.shape[1]}×{image.shape[0]} px  |  γ0 range [{vmin:.1f}, {vmax:.1f}] dB  |  image={image.shape} valid={valid_mask.shape}")
                 prog.progress(15)
 
                 status.markdown("`Building land mask…`")
@@ -627,14 +604,14 @@ def main():
                     log(f"WARN: Land masking skipped ({reason})")
                 prog.progress(28)
 
-                status.markdown("`Running CA-CFAR on calibrated image…`")
-                log("Running CA-CFAR on raw calibrated γ0 dB image (no speckle filter)...")
+                status.markdown("`Running CA-CFAR…`")
+                log("Running CA-CFAR on raw calibrated γ0 dB image...")
                 cfar_boxes = cfar_detect(image, valid_mask, land_mask, guard, bg, thresh, mn, mx)
                 log(f"✓ CFAR complete — {len(cfar_boxes)} detections")
                 prog.progress(50)
 
                 status.markdown("`Applying Lee speckle filter for YOLOv8…`")
-                log("Applying Lee speckle filter (YOLO input only, not used by CFAR)...")
+                log("Applying Lee speckle filter (YOLO only)...")
                 filtered = lee(image, valid_mask)
                 log("✓ Lee filter applied")
                 prog.progress(60)
@@ -645,7 +622,7 @@ def main():
                 log(f"✓ YOLOv8 complete — {len(yolo_boxes)} detections")
                 prog.progress(85)
 
-                status.markdown("`Generating output figure…`")
+                status.markdown("`Generating figure…`")
                 log("Generating figure...")
                 fig_buf = figure(image, valid_mask, land_mask, cfar_boxes, yolo_boxes)
                 log("✓ Pipeline complete.")
@@ -665,8 +642,8 @@ def main():
                         f'<p class="mlbl">YOLOv8 Detections</p></div>',
                         unsafe_allow_html=True)
                 with m3:
-                    h, w      = image.shape
-                    land_pct  = 100 * land_mask.sum() / land_mask.size if land_on else 0
+                    h, w     = image.shape
+                    land_pct = 100 * land_mask.sum() / land_mask.size if land_on else 0
                     st.markdown(
                         f'<div class="mbox"><p class="mval dc" style="font-size:1.4rem">'
                         f'{w}×{h}</p><p class="mlbl">{land_pct:.1f}% masked as land</p></div>',
@@ -690,4 +667,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
