@@ -614,13 +614,13 @@ def main():
 
     # Version badge top right
 st.markdown(
-    f'<div style="position:fixed;top:60px;right:18px;z-index:9999;">'
-    f'<span style="font-family:Share Tech Mono,monospace;font-size:.7rem;'
-    f'color:#3d4f6a;background:#0c1428;border:1px solid #111e35;'
-    f'border-radius:3px;padding:3px 8px;letter-spacing:.1em">{APP_VERSION}</span>'
-    f'</div>',
-    unsafe_allow_html=True)
-st.markdown('<p class="main-title">SARDETECT</p>',unsafe_allow_html=True)
+        f'<div style="position:fixed;top:60px;right:18px;z-index:9999;">'
+        f'<span style="font-family:Share Tech Mono,monospace;font-size:.7rem;'
+        f'color:#3d4f6a;background:#0c1428;border:1px solid #111e35;'
+        f'border-radius:3px;padding:3px 8px;letter-spacing:.1em">{APP_VERSION}</span>'
+        f'</div>',
+        unsafe_allow_html=True)
+    st.markdown('<p class="main-title">SARDETECT</p>',unsafe_allow_html=True)
     st.markdown('<p class="sub-title">SYNTHETIC APERTURE RADAR  ·  DUAL METHOD VESSEL DETECTION</p>',unsafe_allow_html=True)
 
     c1,c2,c3=st.columns(3)
