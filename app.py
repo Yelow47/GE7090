@@ -612,8 +612,7 @@ def faq_section():
 def main():
     guard,bg,thresh,mn,mx,conf,overlap,land_on=sidebar()
 
-    # Version badge top right
-st.markdown(
+    st.markdown(
         f'<div style="position:fixed;top:60px;right:18px;z-index:9999;">'
         f'<span style="font-family:Share Tech Mono,monospace;font-size:.7rem;'
         f'color:#3d4f6a;background:#0c1428;border:1px solid #111e35;'
@@ -655,9 +654,6 @@ st.markdown(
 
             def log(msg):
                 logs.append(msg)
-                css = ("log-error" if msg.startswith("ERROR") else
-                       "log-warn"  if msg.startswith("WARN")  else
-                       "log-ok"    if msg.startswith("✓")     else "")
                 lines="".join(
                     f'<span class="{"log-error" if l.startswith("ERROR") else "log-warn" if l.startswith("WARN") else "log-ok" if l.startswith("✓") else ""}">{l}</span><br>'
                     for l in logs)
