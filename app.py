@@ -247,30 +247,24 @@ def _box_mean(img, half):
 
 
 def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
-    """
-    CA-CFAR with annular guard ring on raw calibrated gamma-naught dB image.
-    Speckle filtering is NOT applied before CFAR — consistent with the
-    ArcGIS Detect Bright Ocean Objects workflow which requires unfiltered backscatter.
-    """
-    from scipy.ndimage import label as scipy_label, binary_erosion
+    from scipy.ndimage import label as scipy_label
 
     h, w = img.shape
 
-    # Erode valid mask to remove burst-boundary edge artefacts
-    edge_margin = max(12, bg * 2 + guard)
-    proc_mask   = binary_erosion(valid_mask, iterations=edge_margin, border_value=0)
+    # Remove edge artefacts by simply zeroing a border strip
+    # This replaces binary_erosion which has shape bugs on very large arrays
+    edge   = max(12, bg * 2 + guard)
+    proc_mask = valid_mask.copy().astype(bool)[:h, :w]
+    proc_mask[:edge, :]  = False
+    proc_mask[-edge:, :] = False
+    proc_mask[:, :edge]  = False
+    proc_mask[:, -edge:] = False
+    proc_mask &= ~land_mask[:h, :w]
 
-    # Clip all masks to exact image shape — binary_erosion can return slightly different size
-    proc_mask = proc_mask[:h, :w]
-    land_mask = land_mask[:h, :w]
-    proc_mask &= ~land_mask
-
-    # Fill nodata pixels with background median before filtering
     work    = img.copy()
     bg_fill = float(np.median(img[valid_mask])) if valid_mask.any() else 0.0
     work[~valid_mask] = bg_fill
 
-    # Annular background statistics
     mean_out  = _box_mean(work, bg)
     mean_grd  = _box_mean(work, guard)
     n_out     = (2 * bg + 1)**2
@@ -283,7 +277,6 @@ def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
     var_ring = np.clip((var_out * n_out - var_grd * n_grd) / (n_ring + 1e-10), 0, None)
     std_ring = np.sqrt(var_ring)
 
-    # Clip computed arrays to exact image shape
     mean_ring = mean_ring[:h, :w]
     std_ring  = std_ring[:h, :w]
 
