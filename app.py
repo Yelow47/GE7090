@@ -251,6 +251,9 @@ def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
 
     h, w = img.shape
 
+    # Force all inputs to exactly match img shape
+    valid_mask = valid_mask[:h, :w]
+    land_mask  = land_mask[:h, :w]
     # Remove edge artefacts by simply zeroing a border strip
     # This replaces binary_erosion which has shape bugs on very large arrays
     edge   = max(12, bg * 2 + guard)
