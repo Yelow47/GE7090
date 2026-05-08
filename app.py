@@ -38,7 +38,7 @@ section[data-testid="stSidebar"]{background:#080f1e;border-right:1px solid #0d1a
 hr{border-color:#0d1a2e!important}
 </style>""", unsafe_allow_html=True)
 
-WEIGHTS_URL  = "https://github.com/Yelow47/GE7090/releases/download/v1.0/best.pt"
+WEIGHTS_URL  = "https://github.com/Yelow47/GE7090/releases/download/SAR/best.pt"
 WEIGHTS_PATH = Path("weights/best.pt")
 TEMP_DIR     = Path(tempfile.gettempdir()) / "sardetect"
 TEMP_DIR.mkdir(exist_ok=True)
