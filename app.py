@@ -441,18 +441,17 @@ def figure(img, valid_mask, land_mask, cb, yb):
  
  
 # ── SIDEBAR ───────────────────────────────────────────────────
- 
-def sidebar():
+ def sidebar():
     with st.sidebar:
         st.markdown('<p style="font-family:monospace;color:#f0a500;font-size:1.1rem;letter-spacing:.1em">SARDETECT</p>', unsafe_allow_html=True)
         st.markdown('<p style="font-family:monospace;color:#3d4f6a;font-size:.7rem;letter-spacing:.2em">DUAL METHOD DETECTION</p>', unsafe_allow_html=True)
         st.markdown("---")
         st.markdown("**CFAR PARAMETERS**")
-        guard  = st.slider("Guard window",       1,   8,    3)
-        bg     = st.slider("Background window",  6,  25,   12)
-        thresh = st.slider("Threshold factor", 1.0, 15.0,  5.0, 0.5)
-        mn     = st.slider("Min size (px)",      2,  50,    8)
-        mx     = st.slider("Max size (px)",    100, 5000, 1500, 100)
+        guard  = st.slider("Guard window",       1,   8,    4)
+        bg     = st.slider("Background window",  6,  25,   16)
+        thresh = st.slider("Threshold factor", 1.0, 15.0,  6.0, 0.5)
+        mn     = st.slider("Min size (px)",      2,  50,    4)
+        mx     = st.slider("Max size (px)",    100, 5000, 2000, 100)
         st.markdown("---")
         st.markdown("**YOLO PARAMETERS**")
         conf    = st.slider("Confidence",   0.10, 0.90, 0.25, 0.05)
@@ -477,7 +476,6 @@ def sidebar():
         st.markdown("---")
         st.markdown('<p style="font-family:monospace;font-size:.7rem;color:#3d4f6a">Model: YOLOv8m-OBB<br>Dataset: OpenSARWake<br>Xu & Wang, IEEE GRSL 2024<br>github.com/Yelow47/GE7090</p>', unsafe_allow_html=True)
     return guard, bg, thresh, mn, mx, conf, overlap, land_on
- 
  
 # ── FAQ ───────────────────────────────────────────────────────
  
