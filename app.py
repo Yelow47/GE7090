@@ -441,7 +441,7 @@ def figure(img, valid_mask, land_mask, cb, yb):
  
  
 # ── SIDEBAR ───────────────────────────────────────────────────
- def sidebar():
+def sidebar():
     with st.sidebar:
         st.markdown('<p style="font-family:monospace;color:#f0a500;font-size:1.1rem;letter-spacing:.1em">SARDETECT</p>', unsafe_allow_html=True)
         st.markdown('<p style="font-family:monospace;color:#3d4f6a;font-size:.7rem;letter-spacing:.2em">DUAL METHOD DETECTION</p>', unsafe_allow_html=True)
