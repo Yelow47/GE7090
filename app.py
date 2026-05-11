@@ -8,11 +8,11 @@ import traceback
 from pathlib import Path
 from io import BytesIO
 import xml.etree.ElementTree as ET
- 
-APP_VERSION = "v1.09"
- 
+
+APP_VERSION = "v1.10"
+
 st.set_page_config(page_title="SARDetect", page_icon="🛰️", layout="wide")
- 
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Inter:wght@300;400;500;600&display=swap');
@@ -31,7 +31,7 @@ p,li,span{color:#e8edf5}
 .mbox{background:#0c1428;border:1px solid #111e35;border-radius:4px;padding:20px;text-align:center;}
 .mval{font-family:'Share Tech Mono',monospace;font-size:2.6rem;margin:0;line-height:1;}
 .mlbl{font-size:.7rem;color:#8a9ab8;letter-spacing:.18em;margin:6px 0 0;text-transform:uppercase;}
-.cc{color:#00c8f0}.yc{color:#ff4a5a}.dc{color:#8a9ab8}
+.cc{color:#00c8f0}.yc{color:#ff4a5a}.ac{color:#4dff91}.dc{color:#8a9ab8}
 .faq-q{font-family:'Share Tech Mono',monospace;color:#f0a500;font-size:.88rem;margin:20px 0 6px;}
 .faq-a{color:#8a9ab8;font-size:.88rem;line-height:1.7;margin:0;}
 .stButton>button{font-family:'Share Tech Mono',monospace!important;background:#f0a500!important;color:#080e1f!important;border:none!important;border-radius:3px!important;font-weight:700!important;letter-spacing:.1em!important;padding:.55rem 2rem!important;transition:all .2s!important;}
@@ -48,35 +48,35 @@ hr{border-color:#111e35!important;margin:1.5rem 0!important}
 .log-warn{color:#f0a500 !important;}
 .log-ok{color:#4dff91 !important;}
 </style>""", unsafe_allow_html=True)
- 
+
 WEIGHTS_URL  = "https://github.com/Yelow47/GE7090/releases/download/SAR/best.pt"
 WEIGHTS_PATH = Path("weights/best.pt")
 LAND_ZIP     = Path("LandPolygon.zip")
 TILE_SIZE    = 1024
 TEMP_DIR     = Path(tempfile.gettempdir()) / "sardetect"
 TEMP_DIR.mkdir(exist_ok=True)
- 
- 
+
+
 # ── LAND MASK ─────────────────────────────────────────────────
- 
+
 def build_land_mask(transform, shape, crs_epsg):
     import geopandas as gpd
     from rasterio.features import rasterize
     from rasterio.crs import CRS
     from rasterio.transform import array_bounds
     from shapely.geometry import box as shapely_box
- 
+
     rows, cols = shape
     if not LAND_ZIP.exists():
         return np.zeros((rows, cols), dtype=bool)
- 
+
     land_dir = TEMP_DIR / "land"
     land_dir.mkdir(exist_ok=True)
     shp_path = land_dir / "LandPolygon.shp"
     if not shp_path.exists():
         with zipfile.ZipFile(LAND_ZIP) as z:
             z.extractall(land_dir)
- 
+
     gdf = gpd.read_file(str(shp_path))
     epsg = int(crs_epsg) if crs_epsg else 4326
     image_crs = CRS.from_epsg(epsg)
@@ -84,30 +84,37 @@ def build_land_mask(transform, shape, crs_epsg):
         gdf = gdf.set_crs("EPSG:3857")
     if gdf.crs != image_crs:
         gdf = gdf.to_crs(image_crs)
- 
+
     bounds  = array_bounds(rows, cols, transform)
     img_box = shapely_box(*bounds)
     gdf     = gdf[gdf.intersects(img_box)]
- 
+
     if gdf.empty:
         return np.zeros((rows, cols), dtype=bool)
- 
+
     shapes = [(geom, 1) for geom in gdf.geometry if geom is not None]
     mask   = rasterize(shapes, out_shape=(rows, cols),
                        transform=transform, fill=0, dtype=np.uint8)
+
+    # Fix: SAR images have y-axis flipped relative to geographic north-up.
+    # The transform's pixel scale in y is negative (top-to-bottom),
+    # so we flip the rasterised mask vertically to match image row order.
+    if transform.e < 0:
+        mask = np.flipud(mask)
+
     return mask.astype(bool)
- 
- 
+
+
 # ── MODEL ─────────────────────────────────────────────────────
- 
+
 @st.cache_resource(show_spinner=False)
 def load_model():
     from ultralytics import YOLO
     if WEIGHTS_PATH.exists():
         return YOLO(str(WEIGHTS_PATH))
     return None
- 
- 
+
+
 def download_weights():
     WEIGHTS_PATH.parent.mkdir(exist_ok=True)
     r     = requests.get(WEIGHTS_URL, stream=True, timeout=120)
@@ -121,10 +128,10 @@ def download_weights():
             done += len(chunk)
             if total:
                 bar.progress(min(done / total, 1.0))
- 
- 
+
+
 # ── SAR I/O & CALIBRATION ─────────────────────────────────────
- 
+
 def _dn_to_db(dn):
     valid = dn > 0
     flat  = dn[valid] if valid.any() else dn.ravel()
@@ -133,15 +140,14 @@ def _dn_to_db(dn):
     sigma = np.where(valid, dn.astype(np.float64)**2 * 1e-4, 1e-10)
     db    = (10.0 * np.log10(np.clip(sigma, 1e-10, None))).astype(np.float32)
     return db, valid
- 
- 
+
+
 def _match_shapes(db, valid):
-    """Guarantee db and valid are exactly the same shape."""
     h = min(db.shape[0], valid.shape[0])
     w = min(db.shape[1], valid.shape[1])
     return db[:h, :w], valid[:h, :w]
- 
- 
+
+
 def calibrate(dn, safe_dir):
     cal   = list(Path(safe_dir).rglob("calibration-s1*-vv-*.xml"))
     valid = dn > 0
@@ -163,17 +169,14 @@ def calibrate(dn, safe_dir):
     g0   = np.where(valid, dn64**2 / (la**2 + 1e-30), 1e-10)
     db   = (10.0 * np.log10(np.clip(g0, 1e-10, None))).astype(np.float32)
     return db, valid
- 
- 
+
+
 def read_sar(uploaded):
-    """Returns (image_db, valid_mask, transform, crs_epsg).
-    image_db and valid_mask are guaranteed the same shape.
-    """
     import rasterio
     suffix = Path(uploaded.name).suffix.lower()
     tmp    = TEMP_DIR / uploaded.name
     tmp.write_bytes(uploaded.read())
- 
+
     if suffix in [".tiff", ".tif"]:
         with rasterio.open(tmp) as src:
             dn        = src.read(1).astype(np.float32)
@@ -182,7 +185,7 @@ def read_sar(uploaded):
         db, valid = _dn_to_db(dn)
         db, valid = _match_shapes(db, valid)
         return db, valid, transform, crs_epsg
- 
+
     if suffix == ".zip":
         ext = TEMP_DIR / "safe"
         if ext.exists():
@@ -195,12 +198,10 @@ def read_sar(uploaded):
                 "No VV polarization TIFF found in ZIP. "
                 "Upload a Sentinel-1 SAFE folder zipped directly.")
         with rasterio.open(vv[0]) as src:
-            dn       = src.read(1).astype(np.float32)
-            crs_epsg = src.crs.to_epsg() if src.crs else 4326
+            dn            = src.read(1).astype(np.float32)
+            crs_epsg      = src.crs.to_epsg() if src.crs else 4326
             raw_transform = src.transform
- 
-        # COG TIFFs from Copernicus have no georeference embedded.
-        # Read true geographic bounds from the annotation XML geolocation grid.
+
         from rasterio.transform import from_bounds
         safe_dir  = vv[0].parent.parent
         ann_files = list((safe_dir / "annotation").glob("*-vv-*.xml"))
@@ -213,18 +214,18 @@ def read_sar(uploaded):
             transform  = from_bounds(min(lons), min(lats), max(lons), max(lats), cols, rows)
         else:
             transform = raw_transform
- 
+
         db, valid = calibrate(dn, safe_dir)
         db, valid = _match_shapes(db, valid)
         return db, valid, transform, crs_epsg
- 
+
     raise ValueError(
         f"Unsupported file type '{suffix}'. "
         "Upload a GeoTIFF (.tif/.tiff) or zipped Sentinel-1 SAFE folder (.zip).")
- 
- 
+
+
 # ── SPECKLE FILTER — for YOLO only ────────────────────────────
- 
+
 def lee(img, valid_mask, size=7):
     from scipy.ndimage import uniform_filter
     out       = img.copy()
@@ -236,25 +237,22 @@ def lee(img, valid_mask, size=7):
     out       = m + w * (img - m)
     out[~valid_mask] = img[~valid_mask]
     return out
- 
- 
+
+
 # ── CA-CFAR ────────────────────────────────────────────────────
- 
+
 def _box_mean(img, half):
     from scipy.ndimage import uniform_filter
-    return uniform_filter(img, size=2*half+1, mode='nearest')
- 
- 
+    return uniform_filter(img.astype(np.float32), size=2*half+1, mode='nearest')
+
+
 def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
     from scipy.ndimage import label as scipy_label
- 
-    # All arrays clipped to the same shape at the source in read_sar.
-    # Extra safety: clip everything to img shape here too.
+
     h, w       = img.shape
     valid_mask = valid_mask[:h, :w]
     land_mask  = land_mask[:h, :w]
- 
-    # Edge strip removal via slicing — avoids scipy binary_erosion shape bugs
+
     edge      = max(12, bg * 2 + guard)
     proc_mask = valid_mask.copy()
     proc_mask[:edge, :]  = False
@@ -262,26 +260,32 @@ def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
     proc_mask[:, :edge]  = False
     proc_mask[:, -edge:] = False
     proc_mask &= ~land_mask
- 
-    work    = img[:h, :w].copy()
+
+    work    = img[:h, :w].astype(np.float32)
     bg_fill = float(np.median(img[valid_mask])) if valid_mask.any() else 0.0
     work[~valid_mask] = bg_fill
- 
+
+    # Compute work_sq once and reuse to save memory
+    work_sq = work**2
+
     mean_out  = _box_mean(work, bg)
     mean_grd  = _box_mean(work, guard)
     n_out     = (2 * bg + 1)**2
     n_grd     = (2 * guard + 1)**2
     n_ring    = n_out - n_grd
     mean_ring = (mean_out * n_out - mean_grd * n_grd) / (n_ring + 1e-10)
- 
-    var_out  = np.clip(_box_mean(work**2, bg)    - mean_out**2, 0, None)
-    var_grd  = np.clip(_box_mean(work**2, guard) - mean_grd**2, 0, None)
+
+    var_out  = np.clip(_box_mean(work_sq, bg)    - mean_out**2, 0, None)
+    var_grd  = np.clip(_box_mean(work_sq, guard) - mean_grd**2, 0, None)
     var_ring = np.clip((var_out * n_out - var_grd * n_grd) / (n_ring + 1e-10), 0, None)
     std_ring = np.sqrt(var_ring)
- 
+
+    # Free memory before detection
+    del work_sq, var_out, var_grd
+
     detected        = (work > mean_ring + thresh * std_ring) & proc_mask
     labeled, n_feat = scipy_label(detected)
- 
+
     boxes = []
     for i in range(1, n_feat + 1):
         r, c = np.where(labeled == i)
@@ -295,10 +299,28 @@ def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
             h=int(r.max() - r.min() + 1),
         ))
     return boxes
- 
- 
+
+
+# ── AGREEMENT DETECTION ───────────────────────────────────────
+
+def find_agreements(cfar_boxes, yolo_boxes, iou_thresh=0.1):
+    """Find CFAR boxes that overlap with any YOLO box — these are agreement detections."""
+    agreements = set()
+    for ci, cb in enumerate(cfar_boxes):
+        for yb in yolo_boxes:
+            # Simple overlap check using intersection
+            ix0 = max(cb["x_min"], yb["x_min"])
+            iy0 = max(cb["y_min"], yb["y_min"])
+            ix1 = min(cb["x_max"], yb["x_max"])
+            iy1 = min(cb["y_max"], yb["y_max"])
+            if ix1 > ix0 and iy1 > iy0:
+                agreements.add(ci)
+                break
+    return agreements
+
+
 # ── YOLO ───────────────────────────────────────────────────────
- 
+
 def _prepare_yolo_image(img, valid_mask):
     from PIL import Image as PILImage
     src       = img[valid_mask] if valid_mask.any() else img.ravel()
@@ -309,8 +331,8 @@ def _prepare_yolo_image(img, valid_mask):
     png_path  = str(TEMP_DIR / "yolo_input.png")
     PILImage.fromarray(rgb).save(png_path)
     return png_path
- 
- 
+
+
 def yolo_detect(img, valid_mask, conf, overlap, land_mask, log):
     if not WEIGHTS_PATH.exists():
         log("WARN: YOLOv8 weights not found — skipping wake detection.")
@@ -346,7 +368,7 @@ def yolo_detect(img, valid_mask, conf, overlap, land_mask, log):
         log(f"ERROR during SAHI inference: {e}")
         log(traceback.format_exc())
         return []
- 
+
     boxes  = []
     h, w   = land_mask.shape
     n_land = 0
@@ -362,36 +384,89 @@ def yolo_detect(img, valid_mask, conf, overlap, land_mask, log):
     if n_land > 0:
         log(f"  Suppressed {n_land} detections over land.")
     return boxes
- 
- 
+
+
+# ── EXPORT GEOJSON ────────────────────────────────────────────
+
+def export_geojson(cfar_boxes, yolo_boxes, transform, crs_epsg, agreements):
+    """Export detections as GeoJSON with geographic coordinates for ArcGIS."""
+    import json
+
+    def px_to_geo(x, y, tf):
+        lon = tf.c + x * tf.a + y * tf.b
+        lat = tf.f + x * tf.d + y * tf.e
+        return lon, lat
+
+    features = []
+
+    for i, b in enumerate(cfar_boxes):
+        cx = (b["x_min"] + b["x_max"]) / 2
+        cy = (b["y_min"] + b["y_max"]) / 2
+        lon, lat = px_to_geo(cx, cy, transform)
+        det_type = "CFAR+YOLO Agreement" if i in agreements else "CFAR"
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "properties": {
+                "method": det_type,
+                "x_min": b["x_min"], "y_min": b["y_min"],
+                "x_max": b["x_max"], "y_max": b["y_max"],
+                "width_px": b["w"], "height_px": b["h"],
+            }
+        })
+
+    for b in yolo_boxes:
+        cx = (b["x_min"] + b["x_max"]) / 2
+        cy = (b["y_min"] + b["y_max"]) / 2
+        lon, lat = px_to_geo(cx, cy, transform)
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "properties": {
+                "method": "YOLOv8",
+                "confidence": round(b.get("conf", 0), 3),
+                "x_min": b["x_min"], "y_min": b["y_min"],
+                "x_max": b["x_max"], "y_max": b["y_max"],
+                "width_px": b["w"], "height_px": b["h"],
+            }
+        })
+
+    geojson = {
+        "type": "FeatureCollection",
+        "crs": {"type": "name", "properties": {"name": "EPSG:4326"}},
+        "features": features
+    }
+    return json.dumps(geojson, indent=2)
+
+
 # ── DISPLAY & FIGURE ──────────────────────────────────────────
- 
+
 def disp(img, valid_mask=None):
     src     = img[valid_mask] if (valid_mask is not None and valid_mask.any()) else img
     p2, p98 = np.percentile(src, [2, 98])
     return ((np.clip(img, p2, p98) - p2) / (p98 - p2 + 1e-10) * 255).astype(np.uint8)
- 
- 
-def figure(img, valid_mask, land_mask, cb, yb):
+
+
+def figure(img, valid_mask, land_mask, cb, yb, agreements):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.patches as pat
     import matplotlib.gridspec as gs
     from matplotlib.lines import Line2D
- 
+
     d   = disp(img, valid_mask)
     fig = plt.figure(figsize=(22, 8), facecolor="#070d1a")
     g   = gs.GridSpec(1, 3, figure=fig, wspace=.025,
                       left=.005, right=.995, top=.91, bottom=.08)
-    cc, yc, lc = "#00d4ff", "#ff3d5a", "#f0a500"
- 
+    cc, yc, ac, lc = "#00d4ff", "#ff3d5a", "#4dff91", "#f0a500"
+
     land_rgba = np.zeros((*land_mask.shape, 4), dtype=np.float32)
     if land_mask.any():
         land_rgba[land_mask, 0] = 0.94
         land_rgba[land_mask, 1] = 0.65
         land_rgba[land_mask, 3] = 0.30
- 
+
     for col, (title, c, y) in enumerate([
         (f"CFAR  ·  {len(cb)} vessels", cb, []),
         (f"YOLOv8  ·  {len(yb)} wakes", [], yb),
@@ -407,10 +482,14 @@ def figure(img, valid_mask, land_mask, cb, yb):
         ax.set_yticks([])
         for sp in ax.spines.values():
             sp.set_edgecolor("#0d1e35")
-        for b in c:
+
+        for i, b in enumerate(c):
+            # In combined panel, agreements get a different colour
+            color = ac if (col == 2 and i in agreements) else cc
             ax.add_patch(pat.Rectangle(
                 (b["x_min"], b["y_min"]), b["w"], b["h"],
-                lw=1.5, edgecolor=cc, facecolor="none", alpha=.85))
+                lw=1.5, edgecolor=color, facecolor="none", alpha=.85))
+
         for b in y:
             ax.add_patch(pat.Rectangle(
                 (b["x_min"], b["y_min"]), b["w"], b["h"],
@@ -418,14 +497,16 @@ def figure(img, valid_mask, land_mask, cb, yb):
             if "conf" in b:
                 ax.text(b["x_min"], b["y_min"] - 2, f"{b['conf']:.2f}",
                         color=yc, fontsize=5.5, fontfamily="monospace")
- 
+
+    n_agree = len(agreements)
     fig.legend(
         handles=[
             Line2D([0], [0], color=cc, lw=2, label=f"CFAR — {len(cb)} detections"),
             Line2D([0], [0], color=yc, lw=2, label=f"YOLOv8 — {len(yb)} detections"),
+            Line2D([0], [0], color=ac, lw=2, label=f"Agreement — {n_agree} detections"),
             pat.Patch(facecolor=lc, alpha=0.5, label="Land mask"),
         ],
-        loc="lower center", ncol=3,
+        loc="lower center", ncol=4,
         facecolor="#070d1a", edgecolor="#0d1e35",
         labelcolor="#b8c4d8", fontsize=9,
         prop={"family": "monospace"},
@@ -438,9 +519,10 @@ def figure(img, valid_mask, land_mask, cb, yb):
     plt.close(fig)
     buf.seek(0)
     return buf
- 
- 
+
+
 # ── SIDEBAR ───────────────────────────────────────────────────
+
 def sidebar():
     with st.sidebar:
         st.markdown('<p style="font-family:monospace;color:#f0a500;font-size:1.1rem;letter-spacing:.1em">SARDETECT</p>', unsafe_allow_html=True)
@@ -476,9 +558,10 @@ def sidebar():
         st.markdown("---")
         st.markdown('<p style="font-family:monospace;font-size:.7rem;color:#3d4f6a">Model: YOLOv8m-OBB<br>Dataset: OpenSARWake<br>Xu & Wang, IEEE GRSL 2024<br>github.com/Yelow47/GE7090</p>', unsafe_allow_html=True)
     return guard, bg, thresh, mn, mx, conf, overlap, land_on
- 
+
+
 # ── FAQ ───────────────────────────────────────────────────────
- 
+
 def faq_section():
     st.markdown("---")
     st.markdown("## FAQ")
@@ -505,10 +588,18 @@ def faq_section():
          "CFAR detects the ship directly via radar cross-section. YOLOv8 detects it indirectly via wake. "
          "A stationary vessel may have no wake. A fast-moving vessel may be defocused but have a clear wake. "
          "Where both agree, confidence is highest."),
+        ("What does the green colour in the combined overlay mean?",
+         "Green boxes indicate detections where both CFAR and YOLOv8 agree — the same location was flagged "
+         "by both methods. These are the highest confidence vessel detections since two independent approaches "
+         "based on different physical phenomena have identified the same target."),
         ("How does the land mask work?",
          "LandPolygon.zip contains a global polygon shapefile. It is reprojected to match the SAR image CRS "
          "and rasterised directly onto the image grid using geopandas and rasterio. CFAR excludes land pixels "
          "entirely. YOLO detections whose centre falls on land are suppressed. Land shown as amber overlay."),
+        ("What is the GeoJSON export for?",
+         "The GeoJSON file contains all detections as geographic point features with longitude/latitude "
+         "coordinates. It can be opened directly in ArcGIS, QGIS, or any GIS software to overlay detections "
+         "on top of the original SAR imagery or other geographic layers."),
         ("What is radiometric calibration?",
          "Raw Sentinel-1 GRD DN values are converted to gamma-naught γ0 = DN² / LUT², using the "
          "calibration XML in the SAFE package, then to dB scale: γ0_dB = 10 × log₁₀(γ0). "
@@ -517,7 +608,8 @@ def faq_section():
          "Sentinel-1 IW mode GRD in VV polarization. Free from Copernicus Data Space "
          "(dataspace.copernicus.eu). Recommended: Strait of Gibraltar, English Channel, North Sea."),
         ("What does mAP50 mean?",
-         "Mean Average Precision at IoU 0.50. The model achieves competitive mAP50 versus the paper's SWNet (49.0%)."),
+         "Mean Average Precision at IoU 0.50. The model achieves 58.4% mAP50 on the OpenSARWake test set, "
+         "outperforming the paper's purpose-built SWNet architecture (49.0%)."),
     ]:
         st.markdown(f'<p class="faq-q">▸ {q}</p>', unsafe_allow_html=True)
         st.markdown(f'<p class="faq-a">{a}</p>', unsafe_allow_html=True)
@@ -527,13 +619,13 @@ def faq_section():
         'OpenSARWake — Xu & Wang (2024) · IEEE GRSL · DOI: 10.1109/LGRS.2024.3392681<br>'
         'Built with Streamlit · Ultralytics YOLOv8 · SAHI · Rasterio · GeoPandas · SciPy'
         '</p>', unsafe_allow_html=True)
- 
- 
+
+
 # ── MAIN ──────────────────────────────────────────────────────
- 
+
 def main():
     guard, bg, thresh, mn, mx, conf, overlap, land_on = sidebar()
- 
+
     st.markdown(
         f'<div style="position:fixed;top:60px;right:18px;z-index:9999;">'
         f'<span style="font-family:Share Tech Mono,monospace;font-size:.7rem;'
@@ -543,7 +635,7 @@ def main():
         unsafe_allow_html=True)
     st.markdown('<p class="main-title">SARDETECT</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-title">SYNTHETIC APERTURE RADAR  ·  DUAL METHOD VESSEL DETECTION</p>', unsafe_allow_html=True)
- 
+
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown(
@@ -560,30 +652,30 @@ def main():
     with c3:
         st.markdown(
             '<div class="card comb-top"><h4>COMBINED OUTPUT</h4>'
-            '<p>Side-by-side comparison with detections from both methods overlaid '
-            'on the same SAR scene. Land mask shown in amber.</p></div>',
+            '<p>Side-by-side comparison. Green boxes show agreement between both methods — '
+            'highest confidence detections.</p></div>',
             unsafe_allow_html=True)
- 
+
     st.markdown("---")
     st.markdown("### UPLOAD SAR IMAGE")
     st.markdown(
         '<p class="upload-hint">Supported: GeoTIFF (.tif/.tiff) · Zipped Sentinel-1 SAFE folder (.zip)</p>',
         unsafe_allow_html=True)
- 
+
     uploaded = st.file_uploader("", type=["tif", "tiff", "zip"], label_visibility="collapsed")
- 
+
     if uploaded:
         st.markdown(
             f'<p style="font-family:monospace;font-size:.78rem;color:#8a9ab8">'
             f'✓ {uploaded.name} — {uploaded.size/1e6:.1f} MB</p>',
             unsafe_allow_html=True)
- 
+
         if st.button("▶  RUN DETECTION"):
             prog    = st.progress(0)
             status  = st.empty()
             log_box = st.empty()
             logs    = []
- 
+
             def log(msg):
                 logs.append(msg)
                 lines = "".join(
@@ -592,7 +684,7 @@ def main():
                     f'">{l}</span><br>'
                     for l in logs)
                 log_box.markdown(f'<div class="log-box">{lines}</div>', unsafe_allow_html=True)
- 
+
             try:
                 status.markdown("`Reading SAR image…`")
                 log("Reading SAR image...")
@@ -600,7 +692,7 @@ def main():
                 vmin, vmax = image[valid_mask].min(), image[valid_mask].max()
                 log(f"✓ Loaded: {image.shape[1]}×{image.shape[0]} px  |  γ0 range [{vmin:.1f}, {vmax:.1f}] dB  |  image={image.shape} valid={valid_mask.shape}")
                 prog.progress(15)
- 
+
                 status.markdown("`Building land mask…`")
                 log("Building land mask...")
                 if land_on and LAND_ZIP.exists():
@@ -612,34 +704,39 @@ def main():
                     reason    = "disabled by user" if not land_on else "LandPolygon.zip not found"
                     log(f"WARN: Land masking skipped ({reason})")
                 prog.progress(28)
- 
+
                 status.markdown("`Running CA-CFAR…`")
                 log("Running CA-CFAR on raw calibrated γ0 dB image...")
                 cfar_boxes = cfar_detect(image, valid_mask, land_mask, guard, bg, thresh, mn, mx)
                 log(f"✓ CFAR complete — {len(cfar_boxes)} detections")
                 prog.progress(50)
- 
+
                 status.markdown("`Applying Lee speckle filter for YOLOv8…`")
                 log("Applying Lee speckle filter (YOLO only)...")
                 filtered = lee(image, valid_mask)
                 log("✓ Lee filter applied")
                 prog.progress(60)
- 
+
                 status.markdown("`Running YOLOv8 wake detection…`")
                 log("Running YOLOv8 wake detection via SAHI...")
                 yolo_boxes = yolo_detect(filtered, valid_mask, conf, overlap, land_mask, log)
                 log(f"✓ YOLOv8 complete — {len(yolo_boxes)} detections")
+                prog.progress(80)
+
+                status.markdown("`Finding agreements…`")
+                agreements = find_agreements(cfar_boxes, yolo_boxes)
+                log(f"✓ Agreements found — {len(agreements)} detections confirmed by both methods")
                 prog.progress(85)
- 
+
                 status.markdown("`Generating figure…`")
                 log("Generating figure...")
-                fig_buf = figure(image, valid_mask, land_mask, cfar_boxes, yolo_boxes)
+                fig_buf = figure(image, valid_mask, land_mask, cfar_boxes, yolo_boxes, agreements)
                 log("✓ Pipeline complete.")
                 prog.progress(100)
                 status.empty()
- 
+
                 st.markdown("### RESULTS")
-                m1, m2, m3 = st.columns(3)
+                m1, m2, m3, m4 = st.columns(4)
                 with m1:
                     st.markdown(
                         f'<div class="mbox"><p class="mval cc">{len(cfar_boxes)}</p>'
@@ -651,29 +748,45 @@ def main():
                         f'<p class="mlbl">YOLOv8 Detections</p></div>',
                         unsafe_allow_html=True)
                 with m3:
+                    st.markdown(
+                        f'<div class="mbox"><p class="mval ac">{len(agreements)}</p>'
+                        f'<p class="mlbl">Agreements</p></div>',
+                        unsafe_allow_html=True)
+                with m4:
                     h, w     = image.shape
                     land_pct = 100 * land_mask.sum() / land_mask.size if land_on else 0
                     st.markdown(
                         f'<div class="mbox"><p class="mval dc" style="font-size:1.4rem">'
                         f'{w}×{h}</p><p class="mlbl">{land_pct:.1f}% masked as land</p></div>',
                         unsafe_allow_html=True)
- 
+
                 st.markdown("")
                 st.image(fig_buf, use_container_width=True)
-                st.download_button(
-                    "⬇  DOWNLOAD RESULT",
-                    data=fig_buf.getvalue(),
-                    file_name=f"sardetect_{Path(uploaded.name).stem}.png",
-                    mime="image/png")
- 
+
+                col_dl1, col_dl2 = st.columns(2)
+                with col_dl1:
+                    st.download_button(
+                        "⬇  DOWNLOAD RESULT IMAGE",
+                        data=fig_buf.getvalue(),
+                        file_name=f"sardetect_{Path(uploaded.name).stem}.png",
+                        mime="image/png")
+                with col_dl2:
+                    geojson_str = export_geojson(
+                        cfar_boxes, yolo_boxes, transform, crs_epsg, agreements)
+                    st.download_button(
+                        "⬇  DOWNLOAD GEOJSON (ArcGIS)",
+                        data=geojson_str,
+                        file_name=f"sardetect_{Path(uploaded.name).stem}.geojson",
+                        mime="application/geo+json")
+
             except Exception as e:
                 log(f"ERROR: {e}")
                 log(traceback.format_exc())
                 status.error(f"Processing failed: {e}")
- 
+
     faq_section()
- 
- 
+
+
 if __name__ == "__main__":
     main()
  
