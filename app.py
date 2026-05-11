@@ -9,7 +9,7 @@ from pathlib import Path
 from io import BytesIO
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "v1.11"
+APP_VERSION = "v1.12"
 
 st.set_page_config(page_title="SARDetect", page_icon="🛰️", layout="wide")
 
