@@ -9,7 +9,7 @@ from pathlib import Path
 from io import BytesIO
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "v1.12"
+APP_VERSION = "v1.13"
 
 st.set_page_config(page_title="SARDetect", page_icon="🛰️", layout="wide")
 
@@ -60,6 +60,12 @@ TEMP_DIR.mkdir(exist_ok=True)
 # ── LAND MASK ─────────────────────────────────────────────────
 
 def build_land_mask(transform, shape, crs_epsg):
+    """
+    Rasterise global land polygon onto the SAR image grid.
+    Uses the least-squares affine transform built from the full geolocation
+    grid, so rasterize receives the same coordinate system as the image.
+    No flipping required — confirmed correct by backscatter test.
+    """
     import geopandas as gpd
     from rasterio.features import rasterize
     from rasterio.crs import CRS
@@ -93,30 +99,8 @@ def build_land_mask(transform, shape, crs_epsg):
         return np.zeros((rows, cols), dtype=bool)
 
     shapes = [(geom, 1) for geom in gdf.geometry if geom is not None]
-
-    # Use an explicit north-up transform for rasterization so that geographic
-    # polygons are burned correctly regardless of whether the image transform
-    # has a negative y-pixel size (top-down raster convention).
-    # Then flip the result if the image itself is stored top-down (e < 0),
-    # which is the standard case for GeoTIFFs and Sentinel-1 products.
-    from rasterio.transform import from_bounds as _from_bounds
-    # Build a north-up (positive y scale) transform over the same bounding box
-    north_up_tf = _from_bounds(*bounds, cols, rows)
-    # Force positive y scale so rasterize treats row 0 as the southern edge
-    if north_up_tf.e < 0:
-        # Flip: swap min_lat / max_lat so row 0 = south
-        xmin, ymin, xmax, ymax = bounds
-        north_up_tf = _from_bounds(xmin, ymin, xmax, ymax, cols, rows)
-
-    mask = rasterize(shapes, out_shape=(rows, cols),
-                     transform=north_up_tf, fill=0, dtype=np.uint8)
-
-    # The rasterised result has row 0 at the south.  If the actual image has
-    # row 0 at the top (transform.e < 0, which is normal for SAR GeoTIFFs),
-    # flip vertically so land pixels align with image pixels.
-    if transform.e < 0:
-        mask = np.flipud(mask)
-
+    mask   = rasterize(shapes, out_shape=(rows, cols),
+                       transform=transform, fill=0, dtype=np.uint8)
     return mask.astype(bool)
 
 
@@ -217,16 +201,28 @@ def read_sar(uploaded):
             crs_epsg      = src.crs.to_epsg() if src.crs else 4326
             raw_transform = src.transform
 
-        from rasterio.transform import from_bounds
+        from rasterio.transform import Affine
         safe_dir  = vv[0].parent.parent
         ann_files = list((safe_dir / "annotation").glob("*-vv-*.xml"))
         if ann_files:
-            lons, lats = [], []
+            lons, lats, rows_gcp, cols_gcp = [], [], [], []
             for pt in ET.parse(ann_files[0]).getroot().iter("geolocationGridPoint"):
                 lons.append(float(pt.find("longitude").text))
                 lats.append(float(pt.find("latitude").text))
-            rows, cols = dn.shape
-            transform  = from_bounds(min(lons), min(lats), max(lons), max(lats), cols, rows)
+                rows_gcp.append(float(pt.find("line").text))
+                cols_gcp.append(float(pt.find("pixel").text))
+            rows_gcp = np.array(rows_gcp)
+            cols_gcp = np.array(cols_gcp)
+            lons     = np.array(lons)
+            lats     = np.array(lats)
+            # Least-squares affine fit over all ~200 geolocation grid points.
+            # More accurate than from_bounds which only uses 4 corner values
+            # and ignores the parallelogram distortion of Sentinel-1 IW scenes.
+            A = np.column_stack([cols_gcp, rows_gcp, np.ones(len(cols_gcp))])
+            lon_c, _, _, _ = np.linalg.lstsq(A, lons, rcond=None)
+            lat_c, _, _, _ = np.linalg.lstsq(A, lats, rcond=None)
+            transform = Affine(lon_c[0], lon_c[1], lon_c[2],
+                               lat_c[0], lat_c[1], lat_c[2])
         else:
             transform = raw_transform
 
