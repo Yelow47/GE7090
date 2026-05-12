@@ -9,7 +9,7 @@ from pathlib import Path
 from io import BytesIO
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "v1.13"
+APP_VERSION = "v1.14"
 
 st.set_page_config(page_title="SARDetect", page_icon="🛰️", layout="wide")
 
@@ -257,7 +257,12 @@ def _box_mean(img, half):
     return uniform_filter(img.astype(np.float32), size=2*half+1, mode='nearest')
 
 
-def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
+def cfar_detect(img, valid_mask, land_mask, thresh, min_w, max_w, min_l, max_l):
+    # Guard and background windows are internal CFAR parameters — hardcoded.
+    # Sentinel-1 IW GRD pixel spacing is 10m.
+    GUARD         = 4
+    BG            = 16
+    PIXEL_SPACING = 10  # metres per pixel
     """
     CA-CFAR detection with two speed optimisations applied in sequence:
 
@@ -300,10 +305,8 @@ def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
     land_s  = zoom(land_crop.astype(np.float32),     SCALE, order=1) > 0.5
 
     # Scale CFAR window parameters proportionally
-    guard_s = max(1, int(round(guard * SCALE)))
-    bg_s    = max(3, int(round(bg    * SCALE)))
-    mn_s    = max(1, int(round(mn    * SCALE**2)))
-    mx_s    = max(mn_s + 1, int(round(mx * SCALE**2)))
+    guard_s = max(1, int(round(GUARD * SCALE)))
+    bg_s    = max(3, int(round(BG    * SCALE)))
 
     # ── Core CFAR on downsampled image ────────────────────────────────────
     hs, ws    = img_s.shape
@@ -341,8 +344,12 @@ def cfar_detect(img, valid_mask, land_mask, guard, bg, thresh, mn, mx):
     boxes = []
     for i in range(1, n_feat + 1):
         r, c = np.where(labeled == i)
-        sz   = len(r)
-        if sz < mn_s or sz > mx_s:
+        # Scale blob dimensions back to full resolution in metres
+        blob_w_m = (c.max() - c.min() + 1) * INV * PIXEL_SPACING
+        blob_l_m = (r.max() - r.min() + 1) * INV * PIXEL_SPACING
+        if blob_w_m < min_w or blob_w_m > max_w:
+            continue
+        if blob_l_m < min_l or blob_l_m > max_l:
             continue
         # Scale from downsampled crop space → full image space
         x_min = int(c.min() * INV) + c0
@@ -584,11 +591,11 @@ def sidebar():
         st.markdown('<p style="font-family:monospace;color:#3d4f6a;font-size:.7rem;letter-spacing:.2em">DUAL METHOD DETECTION</p>', unsafe_allow_html=True)
         st.markdown("---")
         st.markdown("**CFAR PARAMETERS**")
-        guard  = st.slider("Guard window",       1,   8,    4)
-        bg     = st.slider("Background window",  6,  25,   16)
-        thresh = st.slider("Threshold factor", 1.0, 15.0,  6.0, 0.5)
-        mn     = st.slider("Min size (px)",      2,  50,    4)
-        mx     = st.slider("Max size (px)",    100, 5000, 2000, 100)
+        thresh  = st.slider("Threshold factor",       1.0, 15.0,   6.0, 0.5)
+        min_w   = st.slider("Min object width (m)",     1,  100,    5)
+        max_w   = st.slider("Max object width (m)",    50, 1500,  500)
+        min_l   = st.slider("Min object length (m)",    1,  100,   10)
+        max_l   = st.slider("Max object length (m)",   50, 2000,  700)
         st.markdown("---")
         st.markdown("**YOLO PARAMETERS**")
         conf    = st.slider("Confidence",   0.10, 0.90, 0.25, 0.05)
@@ -612,7 +619,7 @@ def sidebar():
         st.markdown(f'<p style="font-family:monospace;font-size:.7rem;color:#3d4f6a">{land_status}</p>', unsafe_allow_html=True)
         st.markdown("---")
         st.markdown('<p style="font-family:monospace;font-size:.7rem;color:#3d4f6a">Model: YOLOv8m-OBB<br>Dataset: OpenSARWake<br>Xu & Wang, IEEE GRSL 2024<br>github.com/Yelow47/GE7090</p>', unsafe_allow_html=True)
-    return guard, bg, thresh, mn, mx, conf, overlap, land_on
+    return thresh, min_w, max_w, min_l, max_l, conf, overlap, land_on
 
 
 # ── FAQ ───────────────────────────────────────────────────────
@@ -679,7 +686,7 @@ def faq_section():
 # ── MAIN ──────────────────────────────────────────────────────
 
 def main():
-    guard, bg, thresh, mn, mx, conf, overlap, land_on = sidebar()
+    thresh, min_w, max_w, min_l, max_l, conf, overlap, land_on = sidebar()
 
     st.markdown(
         f'<div style="position:fixed;top:60px;right:18px;z-index:9999;">'
@@ -762,7 +769,7 @@ def main():
 
                 status.markdown("`Running CA-CFAR…`")
                 log("Running CA-CFAR on raw calibrated γ0 dB image (cropped + half-resolution)...")
-                cfar_boxes = cfar_detect(image, valid_mask, land_mask, guard, bg, thresh, mn, mx)
+                cfar_boxes = cfar_detect(image, valid_mask, land_mask, thresh, min_w, max_w, min_l, max_l)
                 log(f"✓ CFAR complete — {len(cfar_boxes)} detections")
                 prog.progress(50)
 
