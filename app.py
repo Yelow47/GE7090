@@ -9,7 +9,7 @@ from pathlib import Path
 from io import BytesIO
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "v1.14"
+APP_VERSION = "v1.15"
 
 st.set_page_config(page_title="SARDetect", page_icon="🛰️", layout="wide")
 
@@ -258,80 +258,58 @@ def _box_mean(img, half):
 
 
 def cfar_detect(img, valid_mask, land_mask, thresh, min_w, max_w, min_l, max_l):
-    # Guard and background windows are internal CFAR parameters — hardcoded.
-    # Sentinel-1 IW GRD pixel spacing is 10m.
+    """
+    CA-CFAR with annular guard ring at full resolution.
+    Speed optimisation: crop to bounding box of valid pixels first,
+    removing nodata corner triangles (~30-40% of pixels on typical scenes).
+    No downsampling — runs at full 10m resolution for accurate detections.
+    Sentinel-1 IW GRD pixel spacing = 10m.
+    """
+    from scipy.ndimage import label as scipy_label
+
     GUARD         = 4
     BG            = 16
     PIXEL_SPACING = 10  # metres per pixel
-    """
-    CA-CFAR detection with two speed optimisations applied in sequence:
-
-    1. Crop to the bounding box of valid (non-nodata) pixels.
-       Nodata triangles in SAR corner fill areas are skipped entirely.
-       Coordinates are mapped back to the full image before returning.
-
-    2. Downsample the cropped region to half resolution before running
-       the four expensive uniform_filter passes (~4× faster).
-       Detected boxes are scaled back to full-resolution coordinates.
-       At Sentinel-1 IW 10 m GSD a ship occupies ~20 px; at half resolution
-       it still covers ~10 px, so no meaningful detection loss occurs.
-    """
-    from scipy.ndimage import label as scipy_label
-    from scipy.ndimage import zoom
 
     h, w       = img.shape
     valid_mask = valid_mask[:h, :w]
     land_mask  = land_mask[:h, :w]
 
-    # ── Optimisation 1: crop to bounding box of valid pixels ──────────────
+    # Crop to bounding box of valid pixels — skips nodata corner triangles
     rows_valid = np.where(valid_mask.any(axis=1))[0]
     cols_valid = np.where(valid_mask.any(axis=0))[0]
-
     if rows_valid.size == 0 or cols_valid.size == 0:
-        # Entire image is nodata — nothing to detect
         return []
 
-    r0, r1 = int(rows_valid[0]),  int(rows_valid[-1])  + 1
-    c0, c1 = int(cols_valid[0]),  int(cols_valid[-1])  + 1
+    r0, r1 = int(rows_valid[0]), int(rows_valid[-1]) + 1
+    c0, c1 = int(cols_valid[0]), int(cols_valid[-1]) + 1
 
-    img_crop   = img[r0:r1, c0:c1]
+    work       = img[r0:r1, c0:c1].astype(np.float32)
     valid_crop = valid_mask[r0:r1, c0:c1]
     land_crop  = land_mask[r0:r1, c0:c1]
 
-    # ── Optimisation 2: downsample to half resolution ─────────────────────
-    SCALE = 0.5
-    img_s   = zoom(img_crop,                         SCALE, order=1)
-    valid_s = zoom(valid_crop.astype(np.float32),    SCALE, order=1) > 0.5
-    land_s  = zoom(land_crop.astype(np.float32),     SCALE, order=1) > 0.5
+    # Edge strip removal
+    edge      = max(12, BG * 2 + GUARD)
+    proc_mask = valid_crop.copy()
+    proc_mask[:edge, :]  = False
+    proc_mask[-edge:, :] = False
+    proc_mask[:, :edge]  = False
+    proc_mask[:, -edge:] = False
+    proc_mask &= ~land_crop
 
-    # Scale CFAR window parameters proportionally
-    guard_s = max(1, int(round(GUARD * SCALE)))
-    bg_s    = max(3, int(round(BG    * SCALE)))
-
-    # ── Core CFAR on downsampled image ────────────────────────────────────
-    hs, ws    = img_s.shape
-    edge      = max(12, bg_s * 2 + guard_s)
-    proc_mask = valid_s.copy()
-    proc_mask[:edge, :]   = False
-    proc_mask[-edge:, :]  = False
-    proc_mask[:, :edge]   = False
-    proc_mask[:, -edge:]  = False
-    proc_mask &= ~land_s
-
-    bg_fill = float(np.median(img_s[valid_s])) if valid_s.any() else 0.0
-    work    = img_s.astype(np.float32)
-    work[~valid_s] = bg_fill
+    bg_fill = float(np.median(work[valid_crop])) if valid_crop.any() else 0.0
+    work[~valid_crop] = bg_fill
 
     work_sq   = work**2
-    mean_out  = _box_mean(work, bg_s)
-    mean_grd  = _box_mean(work, guard_s)
-    n_out     = (2 * bg_s    + 1)**2
-    n_grd     = (2 * guard_s + 1)**2
+    mean_out  = _box_mean(work, BG)
+    mean_grd  = _box_mean(work, GUARD)
+    n_out     = (2 * BG    + 1)**2
+    n_grd     = (2 * GUARD + 1)**2
     n_ring    = n_out - n_grd
     mean_ring = (mean_out * n_out - mean_grd * n_grd) / (n_ring + 1e-10)
 
-    var_out  = np.clip(_box_mean(work_sq, bg_s)    - mean_out**2, 0, None)
-    var_grd  = np.clip(_box_mean(work_sq, guard_s) - mean_grd**2, 0, None)
+    var_out  = np.clip(_box_mean(work_sq, BG)    - mean_out**2, 0, None)
+    var_grd  = np.clip(_box_mean(work_sq, GUARD) - mean_grd**2, 0, None)
     var_ring = np.clip((var_out * n_out - var_grd * n_grd) / (n_ring + 1e-10), 0, None)
     std_ring = np.sqrt(var_ring)
     del work_sq, var_out, var_grd
@@ -339,23 +317,19 @@ def cfar_detect(img, valid_mask, land_mask, thresh, min_w, max_w, min_l, max_l):
     detected        = (work > mean_ring + thresh * std_ring) & proc_mask
     labeled, n_feat = scipy_label(detected)
 
-    # ── Scale boxes back to full image coordinates ────────────────────────
-    INV = 1.0 / SCALE
     boxes = []
     for i in range(1, n_feat + 1):
-        r, c = np.where(labeled == i)
-        # Scale blob dimensions back to full resolution in metres
-        blob_w_m = (c.max() - c.min() + 1) * INV * PIXEL_SPACING
-        blob_l_m = (r.max() - r.min() + 1) * INV * PIXEL_SPACING
+        r, c     = np.where(labeled == i)
+        blob_w_m = (c.max() - c.min() + 1) * PIXEL_SPACING
+        blob_l_m = (r.max() - r.min() + 1) * PIXEL_SPACING
         if blob_w_m < min_w or blob_w_m > max_w:
             continue
         if blob_l_m < min_l or blob_l_m > max_l:
             continue
-        # Scale from downsampled crop space → full image space
-        x_min = int(c.min() * INV) + c0
-        y_min = int(r.min() * INV) + r0
-        x_max = int(c.max() * INV) + c0
-        y_max = int(r.max() * INV) + r0
+        x_min = int(c.min()) + c0
+        y_min = int(r.min()) + r0
+        x_max = int(c.max()) + c0
+        y_max = int(r.max()) + r0
         boxes.append(dict(
             x_min=x_min, y_min=y_min,
             x_max=x_max, y_max=y_max,
@@ -367,16 +341,24 @@ def cfar_detect(img, valid_mask, land_mask, thresh, min_w, max_w, min_l, max_l):
 
 # ── AGREEMENT DETECTION ───────────────────────────────────────
 
-def find_agreements(cfar_boxes, yolo_boxes, iou_thresh=0.1):
-    """Find CFAR boxes that overlap with any YOLO box — these are agreement detections."""
+def find_agreements(cfar_boxes, yolo_boxes, max_dist_px=100):
+    """
+    Find CFAR detections that are within max_dist_px of a YOLO detection.
+    Uses centre-point proximity rather than bounding box overlap, since CFAR
+    detects the vessel hull (small tight box) while YOLO detects the wake
+    (large elongated box extending behind the vessel). The two boxes rarely
+    overlap directly but their centres are close.
+    100px at 10m resolution = 1km proximity threshold.
+    """
     agreements = set()
     for ci, cb in enumerate(cfar_boxes):
+        cfar_cx = (cb["x_min"] + cb["x_max"]) / 2
+        cfar_cy = (cb["y_min"] + cb["y_max"]) / 2
         for yb in yolo_boxes:
-            ix0 = max(cb["x_min"], yb["x_min"])
-            iy0 = max(cb["y_min"], yb["y_min"])
-            ix1 = min(cb["x_max"], yb["x_max"])
-            iy1 = min(cb["y_max"], yb["y_max"])
-            if ix1 > ix0 and iy1 > iy0:
+            yolo_cx = (yb["x_min"] + yb["x_max"]) / 2
+            yolo_cy = (yb["y_min"] + yb["y_max"]) / 2
+            dist = ((cfar_cx - yolo_cx)**2 + (cfar_cy - yolo_cy)**2)**0.5
+            if dist < max_dist_px:
                 agreements.add(ci)
                 break
     return agreements
@@ -451,55 +433,77 @@ def yolo_detect(img, valid_mask, conf, overlap, land_mask, log):
 
 # ── EXPORT GEOJSON ────────────────────────────────────────────
 
-def export_geojson(cfar_boxes, yolo_boxes, transform, crs_epsg, agreements):
-    """Export detections as GeoJSON with geographic coordinates for ArcGIS."""
-    import json
+def export_geojson_zip(cfar_boxes, yolo_boxes, transform, agreements, stem):
+    """
+    Export detections as a ZIP file containing three GeoJSON files:
+      - cfar.geojson       — CFAR detections only
+      - yolo.geojson       — YOLOv8 detections only
+      - combined.geojson   — all detections with method attribute
+    All features are geographic point coordinates (EPSG:4326).
+    """
+    import json, io
 
-    def px_to_geo(x, y, tf):
-        lon = tf.c + x * tf.a + y * tf.b
-        lat = tf.f + x * tf.d + y * tf.e
-        return lon, lat
+    def px_to_geo(col, row, tf):
+        """Convert pixel (col, row) to (lon, lat) using affine transform."""
+        lon = tf.c + col * tf.a + row * tf.b
+        lat = tf.f + col * tf.d + row * tf.e
+        return float(lon), float(lat)
 
-    features = []
+    def make_fc(features):
+        return {
+            "type": "FeatureCollection",
+            "crs": {"type": "name", "properties": {"name": "EPSG:4326"}},
+            "features": features
+        }
+
+    cfar_features, yolo_features, combined_features = [], [], []
 
     for i, b in enumerate(cfar_boxes):
         cx = (b["x_min"] + b["x_max"]) / 2
         cy = (b["y_min"] + b["y_max"]) / 2
         lon, lat = px_to_geo(cx, cy, transform)
-        det_type = "CFAR+YOLO Agreement" if i in agreements else "CFAR"
-        features.append({
-            "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [lon, lat]},
-            "properties": {
-                "method": det_type,
-                "x_min": b["x_min"], "y_min": b["y_min"],
-                "x_max": b["x_max"], "y_max": b["y_max"],
-                "width_px": b["w"], "height_px": b["h"],
-            }
-        })
+        method = "CFAR+YOLO" if i in agreements else "CFAR"
+        props = {
+            "method": method,
+            "width_m":  b["w"] * 10,
+            "height_m": b["h"] * 10,
+            "x_min": b["x_min"], "y_min": b["y_min"],
+            "x_max": b["x_max"], "y_max": b["y_max"],
+        }
+        feat = {"type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": props}
+        cfar_features.append(feat)
+        combined_features.append(feat)
 
     for b in yolo_boxes:
         cx = (b["x_min"] + b["x_max"]) / 2
         cy = (b["y_min"] + b["y_max"]) / 2
         lon, lat = px_to_geo(cx, cy, transform)
-        features.append({
-            "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [lon, lat]},
-            "properties": {
-                "method": "YOLOv8",
-                "confidence": round(b.get("conf", 0), 3),
-                "x_min": b["x_min"], "y_min": b["y_min"],
-                "x_max": b["x_max"], "y_max": b["y_max"],
-                "width_px": b["w"], "height_px": b["h"],
-            }
-        })
+        props = {
+            "method": "YOLOv8",
+            "confidence": round(b.get("conf", 0), 3),
+            "width_m":  b["w"] * 10,
+            "height_m": b["h"] * 10,
+            "x_min": b["x_min"], "y_min": b["y_min"],
+            "x_max": b["x_max"], "y_max": b["y_max"],
+        }
+        feat = {"type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": props}
+        yolo_features.append(feat)
+        combined_features.append(feat)
 
-    geojson = {
-        "type": "FeatureCollection",
-        "crs": {"type": "name", "properties": {"name": "EPSG:4326"}},
-        "features": features
-    }
-    return json.dumps(geojson, indent=2)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{stem}_cfar.geojson",
+                    json.dumps(make_fc(cfar_features), indent=2))
+        zf.writestr(f"{stem}_yolo.geojson",
+                    json.dumps(make_fc(yolo_features), indent=2))
+        zf.writestr(f"{stem}_combined.geojson",
+                    json.dumps(make_fc(combined_features), indent=2))
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # ── DISPLAY & FIGURE ──────────────────────────────────────────
@@ -833,13 +837,14 @@ def main():
                         file_name=f"sardetect_{Path(uploaded.name).stem}.png",
                         mime="image/png")
                 with col_dl2:
-                    geojson_str = export_geojson(
-                        cfar_boxes, yolo_boxes, transform, crs_epsg, agreements)
+                    stem = Path(uploaded.name).stem
+                    zip_bytes = export_geojson_zip(
+                        cfar_boxes, yolo_boxes, transform, agreements, stem)
                     st.download_button(
-                        "⬇  DOWNLOAD GEOJSON (ArcGIS)",
-                        data=geojson_str,
-                        file_name=f"sardetect_{Path(uploaded.name).stem}.geojson",
-                        mime="application/geo+json")
+                        "⬇  DOWNLOAD GEOJSON ZIP (ArcGIS)",
+                        data=zip_bytes,
+                        file_name=f"sardetect_{stem}_detections.zip",
+                        mime="application/zip")
 
             except Exception as e:
                 log(f"ERROR: {e}")
