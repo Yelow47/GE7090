@@ -772,7 +772,7 @@ def main():
                 prog.progress(28)
 
                 status.markdown("`Running CA-CFAR…`")
-                log("Running CA-CFAR on raw calibrated γ0 dB image (cropped + half-resolution)...")
+                log("Running CA-CFAR on raw calibrated γ0 dB image (cropped to valid area)...")
                 cfar_boxes = cfar_detect(image, valid_mask, land_mask, thresh, min_w, max_w, min_l, max_l)
                 log(f"✓ CFAR complete — {len(cfar_boxes)} detections")
                 prog.progress(50)
