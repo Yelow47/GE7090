@@ -9,7 +9,7 @@ from pathlib import Path
 from io import BytesIO
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "v1.16"
+APP_VERSION = "v1.17"
 
 st.set_page_config(page_title="SARDetect", page_icon="🛰️", layout="wide")
 
@@ -449,59 +449,58 @@ def yolo_detect(img, valid_mask, conf, overlap, land_mask, log):
     return boxes
 
 
-# ── EXPORT SHAPEFILES ────────────────────────────────────────
+# ── EXPORT SHAPEFILES ─────────────────────────────────────────
 
 def export_shapefiles_zip(cfar_boxes, yolo_boxes, transform, agreements, stem):
     """
-    Export detections as a ZIP containing three shapefiles (point features):
-      - <stem>_cfar.shp       — CFAR detections
-      - <stem>_yolo.shp       — YOLOv8 detections
-      - <stem>_combined.shp   — all detections combined
-    All in EPSG:4326. Ready to drag-and-drop into ArcGIS Pro.
+    Export detections as a ZIP containing three shapefiles (EPSG:4326):
+      - <stem>_cfar.shp       CFAR detections
+      - <stem>_yolo.shp       YOLOv8 detections
+      - <stem>_agreements.shp detections confirmed by both methods
+    Ready to drag-and-drop into ArcGIS Pro — projection baked into .prj file.
     """
-    import io, os, tempfile
+    import io, tempfile
     import geopandas as gpd
     from shapely.geometry import Point
 
     def px_to_geo(col, row, tf):
-        lon = tf.c + col * tf.a + row * tf.b
-        lat = tf.f + col * tf.d + row * tf.e
-        return float(lon), float(lat)
+        return float(tf.c + col*tf.a + row*tf.b), float(tf.f + col*tf.d + row*tf.e)
 
-    cfar_rows, yolo_rows, combined_rows = [], [], []
+    cfar_rows, yolo_rows, agree_rows = [], [], []
 
     for i, b in enumerate(cfar_boxes):
         cx = (b["x_min"] + b["x_max"]) / 2
         cy = (b["y_min"] + b["y_max"]) / 2
         lon, lat = px_to_geo(cx, cy, transform)
-        method = "CFAR+YOLO" if i in agreements else "CFAR"
-        row = {"geometry": Point(lon, lat), "method": method,
-               "width_m": b["w"] * 10, "height_m": b["h"] * 10,
+        row = {"geometry": Point(lon, lat),
+               "method":   "CFAR+YOLO" if i in agreements else "CFAR",
+               "width_m":  b["w"] * 10, "height_m": b["h"] * 10,
                "x_min": b["x_min"], "y_min": b["y_min"],
                "x_max": b["x_max"], "y_max": b["y_max"]}
         cfar_rows.append(row)
-        combined_rows.append(row)
+        if i in agreements:
+            agree_rows.append(row)
 
     for b in yolo_boxes:
         cx = (b["x_min"] + b["x_max"]) / 2
         cy = (b["y_min"] + b["y_max"]) / 2
         lon, lat = px_to_geo(cx, cy, transform)
-        row = {"geometry": Point(lon, lat), "method": "YOLOv8",
-               "conf": round(b.get("conf", 0), 3),
-               "width_m": b["w"] * 10, "height_m": b["h"] * 10,
+        row = {"geometry": Point(lon, lat),
+               "method":   "YOLOv8",
+               "conf":     round(b.get("conf", 0), 3),
+               "width_m":  b["w"] * 10, "height_m": b["h"] * 10,
                "x_min": b["x_min"], "y_min": b["y_min"],
                "x_max": b["x_max"], "y_max": b["y_max"]}
         yolo_rows.append(row)
-        combined_rows.append(row)
 
     tmp = Path(tempfile.mkdtemp())
     buf = io.BytesIO()
 
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, rows in [
-            (f"{stem}_cfar",     cfar_rows),
-            (f"{stem}_yolo",     yolo_rows),
-            (f"{stem}_combined", combined_rows),
+            (f"{stem}_cfar",         cfar_rows),
+            (f"{stem}_yolo",         yolo_rows),
+            (f"{stem}_agreements",   agree_rows),
         ]:
             if not rows:
                 continue
@@ -606,7 +605,7 @@ def sidebar():
         st.markdown('<p style="font-family:monospace;color:#3d4f6a;font-size:.7rem;letter-spacing:.2em">DUAL METHOD DETECTION</p>', unsafe_allow_html=True)
         st.markdown("---")
         st.markdown("**CFAR PARAMETERS**")
-        thresh  = st.slider("Threshold factor",       1.0, 15.0,   6.0, 0.5)
+        thresh  = st.slider("Threshold factor",       1.0, 15.0,   4.0, 0.5)
         min_w   = st.slider("Min object width (m)",     1,  100,    5)
         max_w   = st.slider("Max object width (m)",    50, 1500,  500)
         min_l   = st.slider("Min object length (m)",    1,  100,   10)
@@ -783,7 +782,7 @@ def main():
                 prog.progress(28)
 
                 status.markdown("`Running CA-CFAR…`")
-                log("Running CA-CFAR on raw calibrated γ0 dB image (cropped to valid area)...")
+                log("Running CA-CFAR on raw calibrated γ0 dB image (cropped + half-resolution)...")
                 cfar_boxes = cfar_detect(image, valid_mask, land_mask, thresh, min_w, max_w, min_l, max_l)
                 log(f"✓ CFAR complete — {len(cfar_boxes)} detections")
                 prog.progress(50)
@@ -840,27 +839,37 @@ def main():
                 st.markdown("")
                 st.image(fig_buf, use_container_width=True)
 
-                col_dl1, col_dl2 = st.columns(2)
-                with col_dl1:
-                    st.download_button(
-                        "⬇  DOWNLOAD RESULT IMAGE",
-                        data=fig_buf.getvalue(),
-                        file_name=f"sardetect_{Path(uploaded.name).stem}.png",
-                        mime="image/png")
-                with col_dl2:
-                    stem = Path(uploaded.name).stem
-                    shp_zip = export_shapefiles_zip(
-                        cfar_boxes, yolo_boxes, transform, agreements, stem)
-                    st.download_button(
-                        "⬇  DOWNLOAD SHAPEFILES (ArcGIS)",
-                        data=shp_zip,
-                        file_name=f"sardetect_{stem}_shapefiles.zip",
-                        mime="application/zip")
+                stem = Path(uploaded.name).stem
+
+                # Store results in session state so downloads don't clear the page
+                st.session_state["fig_bytes"]  = fig_buf.getvalue()
+                st.session_state["shp_bytes"]  = export_shapefiles_zip(
+                    cfar_boxes, yolo_boxes, transform, agreements, stem)
+                st.session_state["dl_stem"]    = stem
 
             except Exception as e:
                 log(f"ERROR: {e}")
                 log(traceback.format_exc())
                 status.error(f"Processing failed: {e}")
+
+    # Show download buttons persistently from session state
+    if "fig_bytes" in st.session_state:
+        stem = st.session_state["dl_stem"]
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            st.download_button(
+                "⬇  DOWNLOAD RESULT IMAGE",
+                data=st.session_state["fig_bytes"],
+                file_name=f"sardetect_{stem}.png",
+                mime="image/png",
+                key="dl_img")
+        with col_dl2:
+            st.download_button(
+                "⬇  DOWNLOAD SHAPEFILES (ArcGIS)",
+                data=st.session_state["shp_bytes"],
+                file_name=f"sardetect_{stem}_shapefiles.zip",
+                mime="application/zip",
+                key="dl_shp")
 
     faq_section()
 
