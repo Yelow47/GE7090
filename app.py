@@ -264,17 +264,9 @@ def cfar_detect(img, valid_mask, land_mask, thresh, min_w, max_w, min_l, max_l):
     BG            = 16
     PIXEL_SPACING = 10  # metres per pixel
     """
-    CA-CFAR detection with two speed optimisations applied in sequence:
-
-    1. Crop to the bounding box of valid (non-nodata) pixels.
-       Nodata triangles in SAR corner fill areas are skipped entirely.
-       Coordinates are mapped back to the full image before returning.
-
-    2. Downsample the cropped region to half resolution before running
-       the four expensive uniform_filter passes (~4× faster).
-       Detected boxes are scaled back to full-resolution coordinates.
-       At Sentinel-1 IW 10 m GSD a ship occupies ~20 px; at half resolution
-       it still covers ~10 px, so no meaningful detection loss occurs.
+    CA-CFAR with annular guard ring at full 10m resolution.
+    Speed optimisation: crops to bounding box of valid pixels before
+    filtering, removing nodata corner triangles (~30-40% of pixels).
     """
     from scipy.ndimage import label as scipy_label
     from scipy.ndimage import zoom
