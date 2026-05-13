@@ -602,7 +602,7 @@ def sidebar():
         max_l   = st.slider("Max object length (m)",   50, 2000,  700)
         st.markdown("---")
         st.markdown("**YOLO PARAMETERS**")
-        conf    = st.slider("Confidence",   0.10, 0.90, 0.25, 0.05)
+        conf    = st.slider("Confidence",   0.10, 0.90, 0.40, 0.05)
         overlap = st.slider("Tile overlap", 0.10, 0.40, 0.20, 0.05)
         st.markdown("---")
         land_on = st.checkbox("Apply land mask", value=True)
