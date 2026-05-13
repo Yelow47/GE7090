@@ -9,7 +9,7 @@ from pathlib import Path
 from io import BytesIO
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "v1.17"
+APP_VERSION = "v1.18"
 
 st.set_page_config(page_title="SARDetect", page_icon="🛰️", layout="wide")
 
@@ -359,16 +359,23 @@ def cfar_detect(img, valid_mask, land_mask, thresh, min_w, max_w, min_l, max_l):
 
 # ── AGREEMENT DETECTION ───────────────────────────────────────
 
-def find_agreements(cfar_boxes, yolo_boxes, iou_thresh=0.1):
-    """Find CFAR boxes that overlap with any YOLO box — these are agreement detections."""
+def find_agreements(cfar_boxes, yolo_boxes, max_dist_px=150):
+    """
+    Find CFAR detections within max_dist_px of any YOLO detection centre.
+    Uses centre-point proximity rather than bounding box overlap — CFAR
+    detects the vessel hull (small tight box) while YOLO detects the wake
+    (large box extending behind). They rarely overlap but their centres
+    are close. 150px at 10m/px = 1500m proximity threshold.
+    """
     agreements = set()
     for ci, cb in enumerate(cfar_boxes):
+        cfar_cx = (cb["x_min"] + cb["x_max"]) / 2
+        cfar_cy = (cb["y_min"] + cb["y_max"]) / 2
         for yb in yolo_boxes:
-            ix0 = max(cb["x_min"], yb["x_min"])
-            iy0 = max(cb["y_min"], yb["y_min"])
-            ix1 = min(cb["x_max"], yb["x_max"])
-            iy1 = min(cb["y_max"], yb["y_max"])
-            if ix1 > ix0 and iy1 > iy0:
+            yolo_cx = (yb["x_min"] + yb["x_max"]) / 2
+            yolo_cy = (yb["y_min"] + yb["y_max"]) / 2
+            dist = ((cfar_cx - yolo_cx)**2 + (cfar_cy - yolo_cy)**2)**0.5
+            if dist < max_dist_px:
                 agreements.add(ci)
                 break
     return agreements
@@ -434,10 +441,14 @@ def yolo_detect(img, valid_mask, conf, overlap, land_mask, log):
         if 0 <= cy < h and 0 <= cx < w and land_mask[cy, cx]:
             n_land += 1
             continue
+        # Reject detections larger than 5km in either dimension (nodata edge artefacts)
+        if (x1 - x0) > 500 or (y1 - y0) > 500:
+            n_land += 1  # reuse counter for logging
+            continue
         boxes.append(dict(x_min=x0, y_min=y0, x_max=x1, y_max=y1,
                           w=x1 - x0, h=y1 - y0, conf=float(d.score.value)))
     if n_land > 0:
-        log(f"  Suppressed {n_land} detections over land.")
+        log(f"  Suppressed {n_land} detections over land or exceeding max size.")
     return boxes
 
 
@@ -453,18 +464,21 @@ def export_shapefiles_zip(cfar_boxes, yolo_boxes, transform, agreements, stem):
     """
     import io, tempfile
     import geopandas as gpd
-    from shapely.geometry import Point
+    from shapely.geometry import box as shp_box
 
     def px_to_geo(col, row, tf):
         return float(tf.c + col*tf.a + row*tf.b), float(tf.f + col*tf.d + row*tf.e)
 
+    def bbox_to_polygon(b, tf):
+        """Convert pixel bounding box to geographic polygon."""
+        lon0, lat0 = px_to_geo(b["x_min"], b["y_min"], tf)
+        lon1, lat1 = px_to_geo(b["x_max"], b["y_max"], tf)
+        return shp_box(min(lon0,lon1), min(lat0,lat1), max(lon0,lon1), max(lat0,lat1))
+
     cfar_rows, yolo_rows, agree_rows = [], [], []
 
     for i, b in enumerate(cfar_boxes):
-        cx = (b["x_min"] + b["x_max"]) / 2
-        cy = (b["y_min"] + b["y_max"]) / 2
-        lon, lat = px_to_geo(cx, cy, transform)
-        row = {"geometry": Point(lon, lat),
+        row = {"geometry": bbox_to_polygon(b, transform),
                "method":   "CFAR+YOLO" if i in agreements else "CFAR",
                "width_m":  b["w"] * 10, "height_m": b["h"] * 10,
                "x_min": b["x_min"], "y_min": b["y_min"],
@@ -474,10 +488,7 @@ def export_shapefiles_zip(cfar_boxes, yolo_boxes, transform, agreements, stem):
             agree_rows.append(row)
 
     for b in yolo_boxes:
-        cx = (b["x_min"] + b["x_max"]) / 2
-        cy = (b["y_min"] + b["y_max"]) / 2
-        lon, lat = px_to_geo(cx, cy, transform)
-        row = {"geometry": Point(lon, lat),
+        row = {"geometry": bbox_to_polygon(b, transform),
                "method":   "YOLOv8",
                "conf":     round(b.get("conf", 0), 3),
                "width_m":  b["w"] * 10, "height_m": b["h"] * 10,
@@ -597,7 +608,7 @@ def sidebar():
         st.markdown('<p style="font-family:monospace;color:#3d4f6a;font-size:.7rem;letter-spacing:.2em">DUAL METHOD DETECTION</p>', unsafe_allow_html=True)
         st.markdown("---")
         st.markdown("**CFAR PARAMETERS**")
-        thresh  = st.slider("Threshold factor",       1.0, 15.0,   4.0, 0.5)
+        thresh  = st.slider("Threshold factor",       1.0, 15.0,   5.0, 0.5)
         min_w   = st.slider("Min object width (m)",     1,  100,    5)
         max_w   = st.slider("Max object width (m)",    50, 1500,  500)
         min_l   = st.slider("Min object length (m)",    1,  100,   10)
